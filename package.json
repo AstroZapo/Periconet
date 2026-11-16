@@ -1,0 +1,9 @@
+{
+  "name": "periconet",
+  "version": "1.0.0",
+  "description": "Dashboard para observatorios remotos",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/dashboard.test.cjs"
+  }
+}

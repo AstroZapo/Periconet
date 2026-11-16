@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Periconet · Configuración</title>
+<style>
+  :root {
+    --bg: #09090b; --panel: #131316; --panel-border: #262629;
+    --text: #e4e2df; --text-dim: #8a8782; --accent: #c9463a; --ok: #5a9c5e;
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans);
+    min-height: 100vh; display: flex; justify-content: center; padding: 40px 20px;
+  }
+  .wrap { width: 100%; max-width: 640px; }
+  h1 {
+    font-family: var(--mono); letter-spacing: 0.08em; color: var(--accent);
+    text-transform: uppercase; font-size: 1.2rem; margin-bottom: 4px;
+  }
+  p.subtitle { color: var(--text-dim); margin-top: 0; margin-bottom: 28px; }
+  .setup-card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 16px; margin-bottom: 14px; position: relative;
+  }
+  .setup-card .remove {
+    position: absolute; top: 12px; right: 12px; background: none; border: none;
+    color: var(--text-dim); cursor: pointer; font-size: 1rem;
+  }
+  .setup-card .remove:hover { color: var(--accent); }
+  label {
+    display: block; font-family: var(--mono); font-size: 0.72rem;
+    text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-dim);
+    margin-bottom: 4px; margin-top: 10px;
+  }
+  label:first-of-type { margin-top: 0; }
+  input, select {
+    width: 100%; background: #1a1a1d; border: 1px solid var(--panel-border);
+    border-radius: 4px; color: var(--text); padding: 8px 10px;
+    font-family: var(--mono); font-size: 0.9rem;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  .row { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+  button.primary, button.add {
+    font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.05em;
+    font-size: 0.8rem; border-radius: 4px; border: 1px solid var(--panel-border);
+    background: #1a1a1d; color: var(--text); padding: 10px 16px; cursor: pointer;
+  }
+  button.add { width: 100%; margin-bottom: 20px; }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    width: 100%; padding: 12px; font-size: 0.85rem;
+  }
+  button.primary:hover, button.add:hover { opacity: 0.9; }
+  #status { margin-top: 16px; font-family: var(--mono); font-size: 0.85rem; color: var(--ok); display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Periconet · Configuración</h1>
+  <p class="subtitle">Añade un setup por cada telescopio/mini-PC de tu observatorio. Necesitas su nombre y las IPs donde corren NINA (Advanced API) y PHD2.</p>
+
+  <label>Nombre del observatorio</label>
+  <input id="observatory-name" placeholder="Ej: Observatorio Can Jordi" style="margin-bottom: 24px;">
+
+  <label>Puerto del servidor web</label>
+  <input id="port" type="number" min="1024" max="65535" step="1" placeholder="8000" style="margin-bottom: 4px;">
+  <div style="font-size:0.72rem;color:var(--text-dim);margin-bottom: 24px;">Entre 1024 y 65535. Por defecto 8000. Si lo cambias, reinicia Periconet y abre la nueva dirección (http://localhost:PUERTO).</div>
+
+  <div id="setups"></div>
+
+  <button class="add" onclick="addSetup()">+ Añadir setup</button>
+
+  <h2 style="font-family:var(--mono);font-size:0.85rem;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-dim);margin:8px 0 10px;">Imágenes bajo los setups (opcional)</h2>
+  <div class="setup-card" id="extra-0">
+    <label>Título · gráfico de seeing</label>
+    <input class="x-title" placeholder="Seeing de la noche">
+    <div class="row">
+      <div><label>URL de la imagen</label><input class="x-url" placeholder="https://.../SeeingGraph.png"></div>
+      <div><label>Refresco (s)</label><input class="x-refresh" type="number" min="10" max="86400" step="1" placeholder="300"></div>
+    </div>
+  </div>
+  <div class="setup-card" id="extra-1">
+    <label>Título · cámara all-sky</label>
+    <input class="x-title" placeholder="All-sky">
+    <div class="row">
+      <div><label>URL de la imagen</label><input class="x-url" placeholder="http://.../image.jpg"></div>
+      <div><label>Refresco (s)</label><input class="x-refresh" type="number" min="10" max="86400" step="1" placeholder="60"></div>
+    </div>
+  </div>
+  <div style="font-size:0.72rem;color:var(--text-dim);margin:-6px 0 20px;">Deja la URL vacía para no mostrar esa imagen. La descarga Periconet desde este PC, así que sirve también una URL accesible solo por VPN.</div>
+
+  <button class="primary" onclick="save()">Guardar configuración</button>
+
+  <div id="status"></div>
+</div>
+
+<script src="/static/setup.js" defer></script>
+</body>
+</html>

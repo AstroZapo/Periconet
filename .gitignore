@@ -1,7 +1,34 @@
-config.json
-build/
-dist/
-env/
+# Configuración local y temporales de guardado
+/config.json
+/.config-*.tmp
+
+# Entornos virtuales de Python
+/env/
+/.venv/
+/venv/
+
+# Cachés y resultados de pruebas
 __pycache__/
-*.spec
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+/htmlcov/
+
+# Registros de ejecución (incluidas las rotaciones)
+/logs/
 *.log
+
+# Salidas de PyInstaller
+/build/
+/dist/
+*.spec
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+
+# Archivos del explorador de Windows
+Thumbs.db
+Desktop.ini

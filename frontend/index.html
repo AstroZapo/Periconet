@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Periconet · Observatorio</title>
+<style>
+  :root {
+    --bg: #09090b;
+    --panel: #131316;
+    --panel-border: #262629;
+    --text: #e4e2df;
+    --text-dim: #8a8782;
+    --accent: #c9463a;
+    --ok: #5a9c5e;
+    --warn: #c98a2e;
+    --danger: #d64545;
+    --mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 28px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  header h1 {
+    font-family: var(--mono);
+    letter-spacing: 0.08em;
+    font-size: 1.1rem;
+    margin: 0;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .brand-tag {
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  header .clock {
+    font-family: var(--mono);
+    color: var(--text-dim);
+    font-size: 0.95rem;
+  }
+
+  main {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(620px, 100%), 1fr));
+    gap: 20px;
+    padding: 24px;
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+
+  .panel-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    display: inline-block; margin-right: 8px;
+    background: var(--text-dim);
+  }
+  .dot.connected { background: var(--ok); }
+  .dot.disconnected { background: var(--danger); }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    padding: 3px 8px;
+    border-radius: 3px;
+    background: #1c1c20;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .badge.guiando { color: var(--ok); }
+  .badge.perdida, .badge.unsafe { color: var(--danger); }
+  .badge.detenido { color: var(--warn); }
+
+  .panel-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0; align-items: start; }
+
+  .image-col {
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--panel-border);
+    background: #000;
+  }
+  .image-cell {
+    position: relative;
+    background: #000;
+    min-height: 200px;
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .image-cell:hover img {
+    filter: brightness(1.08);
+  }
+  .image-zoom-badge {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    background: rgba(18, 18, 22, 0.85);
+    backdrop-filter: blur(4px);
+    color: #e4e4e7;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    pointer-events: none;
+    transition: background 0.2s, color 0.2s;
+  }
+  .image-cell:hover .image-zoom-badge {
+    background: rgba(14, 165, 233, 0.9);
+    color: #fff;
+  }
+  .image-cell img { width: 100%; height: auto; display: block; }
+  .image-cell .placeholder { color: var(--text-dim); font-family: var(--mono); font-size: 0.8rem; }
+
+  .exposure-block {
+    padding: 10px 14px;
+    background: #141416;
+    border-top: 1px solid var(--panel-border);
+    user-select: none;
+  }
+  .exposure-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    margin-bottom: 6px;
+  }
+  .exposure-status {
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 500;
+  }
+  .exposure-status.exposing {
+    color: #38bdf8;
+  }
+  .exposure-status.downloading {
+    color: #fbbf24;
+  }
+  .exposure-timer {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .exposure-bar-track {
+    width: 100%;
+    height: 6px;
+    background: #27272a;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .exposure-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #0284c7, #38bdf8);
+    border-radius: 3px;
+    transition: width 0.2s linear;
+  }
+  .exposure-bar-fill.downloading {
+    background: linear-gradient(90deg, #d97706, #fbbf24);
+    animation: pulse-download 1.2s infinite ease-in-out;
+  }
+  @keyframes pulse-download {
+    0%, 100% { opacity: 0.5; }
+    50% { opacity: 1; }
+  }
+
+  .data-cell { display: flex; flex-direction: column; }
+
+  .block { padding: 12px 16px; border-bottom: 1px solid var(--panel-border); }
+  .block:last-child { border-bottom: none; }
+
+  .block-title {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+
+  canvas { display: block; width: 100%; }
+
+  .rms-row {
+    display: flex; gap: 18px; margin-top: 8px;
+    font-family: var(--mono); font-size: 0.8rem; color: var(--text-dim);
+  }
+  .rms-row .rms-value { color: var(--text); font-weight: 600; }
+  .rms-row .rms-ra .rms-value { color: var(--accent); }
+  .rms-row .rms-dec .rms-value { color: #4a9fd8; }
+
+  .hfr-list {
+    font-family: var(--mono); font-size: 0.82rem;
+    max-height: 110px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .hfr-list .hfr-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: start;
+  }
+  .hfr-list .idx { color: var(--text-dim); overflow-wrap: anywhere; }
+  .hfr-list .val { color: var(--ok); text-align: right; }
+
+  /* Objetivo y gráfica de altura (Target Scheduler) */
+  .target-block { padding: 12px 16px; border-bottom: 1px solid var(--panel-border); }
+  .target-header { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .target-title-wrap { display: flex; flex-direction: column; gap: 2px; }
+  .target-label { font-family: var(--mono); font-size: 0.64rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+  .target-name { margin: 0; font-size: 1.05rem; font-weight: 700; color: #38bdf8; letter-spacing: -0.01em; }
+  .target-coords { display: flex; flex-wrap: wrap; gap: 8px 12px; font-family: var(--mono); font-size: 0.74rem; background: #16161a; padding: 5px 9px; border-radius: 4px; border: 1px solid #27272a; }
+  .coord-item { display: inline-flex; gap: 4px; }
+  .coord-item .lbl { color: var(--text-dim); }
+  .coord-item .val { color: var(--text); font-weight: 600; }
+  .target-chart-wrap { position: relative; width: 100%; margin-bottom: 8px; background: #08090d; border: 1px solid #27272a; border-radius: 4px; overflow: hidden; }
+  .target-alt-canvas { display: block; width: 100%; height: 85px; }
+  .target-filters-wrap { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-family: var(--mono); font-size: 0.72rem; }
+  .filter-pill { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; background: #1a1a20; border: 1px solid #2e2e38; border-radius: 3px; }
+  .filter-pill .f-name { color: #e4e4e7; font-weight: 700; }
+  .filter-pill .f-count { color: #38bdf8; font-weight: 600; }
+  .filter-pill .f-time { color: var(--text-dim); font-size: 0.68rem; }
+
+  .meridian { font-family: var(--mono); font-size: 0.9rem; }
+  .meridian .value { color: var(--accent); font-weight: 600; }
+
+  .weather-grid {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 14px;
+    font-family: var(--mono); font-size: 0.85rem;
+  }
+  .weather-grid .label { color: var(--text-dim); }
+  .weather-grid .value { text-align: right; }
+
+  #extras {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 20px; padding: 0 24px 24px;
+  }
+  #extras:empty { display: none; }
+  .extra-card {
+    background: var(--panel); border: 1px solid var(--panel-border);
+    border-radius: 6px; overflow: hidden;
+    flex: 0 1 620px; max-width: 100%;
+  }
+  .extra-card .panel-header h2 { font-size: 0.95rem; }
+  .extra-card .upd { font-family: var(--mono); font-size: 0.7rem; color: var(--text-dim); }
+  .extra-card .extra-body {
+    background: #000; min-height: 120px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .extra-card img { width: 100%; height: auto; display: block; }
+  .extra-card .placeholder { color: var(--text-dim); font-family: var(--mono); font-size: 0.8rem; padding: 30px; }
+
+  /* Visor de alta resolución (Modal / Zoom) */
+  .image-modal {
+    position: fixed;
+    top: 0; left: 0; width: 100vw; height: 100vh;
+    background: rgba(5, 5, 8, 0.96);
+    backdrop-filter: blur(8px);
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+    touch-action: none;
+  }
+  .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 16px;
+    background: #121318;
+    border-bottom: 1px solid #27272a;
+    z-index: 10;
+    flex-shrink: 0;
+  }
+  .modal-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .modal-title {
+    font-weight: 700;
+    font-size: 0.95rem;
+    color: #38bdf8;
+  }
+  .modal-sub {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    color: var(--text-dim);
+  }
+  .modal-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tool-btn {
+    background: #1f2028;
+    border: 1px solid #323440;
+    color: #f4f4f5;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .tool-btn:hover {
+    background: #2a2c38;
+    border-color: #38bdf8;
+  }
+  .tool-btn.close-btn {
+    background: #7f1d1d;
+    border-color: #991b1b;
+    color: #fff;
+    font-weight: 700;
+    margin-left: 6px;
+  }
+  .tool-btn.close-btn:hover {
+    background: #991b1b;
+  }
+
+  .modal-viewport {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: grab;
+  }
+  .modal-viewport:active {
+    cursor: grabbing;
+  }
+  .modal-img {
+    max-width: 95%;
+    max-height: 95%;
+    object-fit: contain;
+    transform-origin: center center;
+    will-change: transform;
+    transition: transform 0.05s ease-out;
+    pointer-events: none;
+  }
+  .modal-loader {
+    position: absolute;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(24, 24, 27, 0.9);
+    border: 1px solid #38bdf8;
+    color: #38bdf8;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    padding: 6px 14px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    pointer-events: none;
+    z-index: 20;
+  }
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(56, 189, 248, 0.3);
+    border-top-color: #38bdf8;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .modal-footer {
+    padding: 6px 16px;
+    background: #0d0e12;
+    border-top: 1px solid #27272a;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--text-dim);
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 700px) {
+    header { padding: 12px 14px; }
+    header h1 { font-size: 0.95rem; }
+    main { padding: 12px; gap: 12px; }
+    #extras { padding: 0 12px 12px; gap: 12px; }
+    .panel-body { grid-template-columns: 1fr; }
+    .image-col { border-right: none; border-bottom: 1px solid var(--panel-border); }
+    .modal-header { padding: 8px 12px; }
+    .modal-title { font-size: 0.85rem; }
+    .tool-btn { padding: 5px 8px; font-size: 0.75rem; }
+    .modal-footer { font-size: 0.6rem; padding: 4px 8px; }
+    footer { padding: 12px; }
+  }
+
+  footer {
+    text-align: center; padding: 16px;
+    color: var(--text-dim); font-family: var(--mono); font-size: 0.75rem;
+  }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1 id="observatory-title">Periconet</h1>
+    <div class="brand-tag" id="brand-tag" style="display:none">Periconet</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;">
+    <button id="sound-toggle" title="Silenciar/activar aviso de estrella perdida" style="background:#1a1a1d;border:1px solid var(--panel-border);border-radius:4px;color:var(--text);padding:6px 10px;cursor:pointer;font-family:var(--mono);font-size:0.85rem;">🔔</button>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<main id="panels"></main>
+
+<section id="extras"></section>
+
+<!-- Visor Lightbox de Alta Resolución con Zoom & Pan -->
+<div id="image-modal" class="image-modal" style="display:none">
+  <div class="modal-header">
+    <div class="modal-title-wrap">
+      <span class="modal-title" id="modal-title">Inspección de imagen</span>
+      <span class="modal-sub" id="modal-sub">Cargando alta resolución…</span>
+    </div>
+    <div class="modal-tools">
+      <button type="button" class="tool-btn" id="btn-zoom-in" title="Acercar (Zoom +)">＋</button>
+      <button type="button" class="tool-btn" id="btn-zoom-out" title="Alejar (Zoom -)">－</button>
+      <button type="button" class="tool-btn" id="btn-zoom-fit" title="Ajustar / 1:1">Ajustar</button>
+      <button type="button" class="tool-btn close-btn" id="btn-modal-close" title="Cerrar (Esc)">✕</button>
+    </div>
+  </div>
+  <div class="modal-viewport" id="modal-viewport">
+    <img id="modal-img" class="modal-img" src="" alt="Captura ampliada" draggable="false">
+    <div class="modal-loader" id="modal-loader" style="display:none">
+      <span class="spinner"></span> Descargando alta resolución…
+    </div>
+  </div>
+  <div class="modal-footer">
+    <span>Rueda del ratón o pellizco para Zoom • Arrastra para desplazarte • Doble click para ampliar • Esc para salir</span>
+  </div>
+</div>
+
+<footer>panel de monitorización local · sin acciones de control, solo lectura · <a href="/setup">editar setups</a></footer>
+
+<script src="/static/dashboard.js" defer></script>
+
+</body>
+</html>

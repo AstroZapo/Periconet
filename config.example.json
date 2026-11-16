@@ -1,0 +1,20 @@
+{
+  "poll_interval_seconds": 5,
+  "hfr_history_points": 60,
+  "observatory_name": "Mi Observatorio",
+  "port": 8000,
+  "setups": [
+    {
+      "id": "setup1",
+      "name": "Telescopio Principal",
+      "nina_host": "localhost",
+      "nina_port": 1888,
+      "phd2_host": "localhost",
+      "phd2_port": 4400,
+      "guide_axis_range": 3.0,
+      "guide_axis_unit": "arcsec"
+    }
+  ],
+  "extra_images": []
+}
+
