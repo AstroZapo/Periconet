@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from clients.nina_client import NinaError
 from monitoring import active_target, fingerprint
 from workers import NinaWorker, build_state, phd2_loop
 
@@ -231,6 +232,44 @@ async def get_config():
 @app.get("/api/setups")
 async def get_setups():
     return [{key: s[key] for key in ("id", "name", "guide_axis_range", "guide_axis_unit")} for s in CONFIG["setups"]]
+
+
+@app.post("/api/setups/{setup_id}/sequence/to-end")
+async def skip_sequence_to_end(setup_id: str, request: Request):
+    # Una petición desde otro origen necesitaría permiso CORS para añadir esta cabecera.
+    if request.headers.get("X-Periconet-Action") != "sequence-to-end":
+        raise HTTPException(403, "Petición de control no válida")
+    worker = WORKERS.get(setup_id)
+    if worker is None:
+        raise HTTPException(404, "El equipo no está disponible")
+    if worker.sequence_end_lock.locked():
+        raise HTTPException(409, "Ya hay una orden en curso para este equipo")
+    async with worker.sequence_end_lock:
+        try:
+            await worker.client.skip_sequence_to_end()
+        except httpx.TimeoutException as exc:
+            raise HTTPException(504, "NINA no respondió a tiempo. Comprueba la secuencia antes de repetir la orden.") from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                await worker.invalidate_sequence_status()
+                try:
+                    body = exc.response.json()
+                except ValueError:
+                    body = None
+                error = body.get("Error") if isinstance(body, dict) else None
+                error = error.strip() if isinstance(error, str) else ""
+                detail = {
+                    "Sequence is not initialized": "El secuenciador avanzado de NINA no está inicializado.",
+                    "Sequence not running": "NINA no tiene una secuencia avanzada en ejecución.",
+                }.get(error, error or "NINA rechazó el salto al bloque final de la secuencia.")
+                raise HTTPException(409, detail) from exc
+            raise HTTPException(502, f"NINA respondió con un error HTTP {exc.response.status_code}") from exc
+        except NinaError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(502, "No se pudo confirmar la orden con NINA. Comprueba la conexión.") from exc
+        worker.wake.set()
+    return {"ok": True}
 
 
 @app.get("/api/state")

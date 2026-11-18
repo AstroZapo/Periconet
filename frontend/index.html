@@ -85,6 +85,31 @@
 
   .panel-header h2 { margin: 0; font-size: 1rem; font-weight: 600; }
 
+  .panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-left: 12px;
+  }
+  .sequence-end-button {
+    border: 1px solid var(--danger);
+    border-radius: 4px;
+    background: #361d20;
+    color: #ffd6d6;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .sequence-end-button:hover:not(:disabled) { background: #512529; }
+  .sequence-end-button:disabled { opacity: 0.65; cursor: not-allowed; }
+  .sequence-end-button[data-sending="true"] { cursor: wait; }
+  .sequence-end-status { font-size: 0.8rem; color: var(--text-dim); }
+  .sequence-end-status:not(:empty) { padding: 8px 16px; border-bottom: 1px solid var(--panel-border); }
+  .sequence-end-status.error { color: #ffaaaa; }
+
   .dot {
     width: 8px; height: 8px; border-radius: 50%;
     display: inline-block; margin-right: 8px;

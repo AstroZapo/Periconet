@@ -8,12 +8,18 @@ function browser() {
   const elements = new Map();
   const images = [];
   class Element {
-    constructor(tag = 'div') { this.tag = tag; this.style = {}; this.dataset = {}; this.children = []; this.textContent = ''; }
+    constructor(tag = 'div') {
+      this.tag = tag; this.style = {}; this.dataset = {}; this.children = []; this.textContent = '';
+      const classes = new Set();
+      this.classList = {add: name => classes.add(name), remove: name => classes.delete(name)};
+      this.listeners = {};
+    }
     appendChild(child) { this.children.push(child); return child; }
     replaceChildren(...children) { this.children = children; }
     querySelector(selector) { return selector === 'img' ? this.children.find(c => c.tag === 'img') : null; }
     removeAttribute(key) { delete this[key]; }
-    addEventListener() {}
+    addEventListener(event, listener) { this.listeners[event] = listener; }
+    setAttribute(key, value) { this[key] = value; }
     getBoundingClientRect() { return {width:500}; }
     getContext() { return new Proxy({}, {get: (_, key) => key === 'createLinearGradient' ? () => ({addColorStop(){}}) : () => {}}); }
   }
@@ -33,6 +39,49 @@ function browser() {
   vm.runInContext(source, context);
   return {context, images, elements, run:code => vm.runInContext(code,context)};
 }
+
+test('el botón de fin de secuencia pide confirmación y muestra la respuesta de NINA', async () => {
+  const b = browser();
+  const panel = b.run('buildPanel({id:"one", name:"Telescopio uno"})');
+  const button = panel.children[0].children[1].children[1];
+  const status = panel.children[1];
+  b.elements.set(button.id, button);
+  assert.equal(button.disabled, true);
+  b.run('applyFullState("one", {connected:true});');
+  assert.equal(button.disabled, true);
+  b.run('applyFullState("one", {sequence_running:true});');
+  assert.equal(button.disabled, false);
+  b.context.window.confirm = () => false;
+  await button.listeners.click();
+  assert.equal(status.textContent, '');
+
+  b.context.window.confirm = message => {
+    assert.match(message, /Telescopio uno/);
+    return true;
+  };
+  b.context.fetch = async (url, options) => {
+    assert.equal(url, '/api/setups/one/sequence/to-end');
+    assert.equal(options.method, 'POST');
+    return {ok: false, json: async () => ({detail: 'NINA no tiene una secuencia avanzada en ejecución'})};
+  };
+  const pending = button.listeners.click();
+  assert.equal(button.disabled, true);
+  await pending;
+  assert.match(status.textContent, /no tiene una secuencia/);
+  assert.equal(button.disabled, false);
+
+  b.context.fetch = async () => {
+    b.run('applyFullState("one", {sequence_running:true});');
+    assert.equal(button.disabled, true);
+    b.run('applyFullState("one", {sequence_running:false});');
+    return {ok: true, json: async () => ({ok: true})};
+  };
+  await button.listeners.click();
+  assert.match(status.textContent, /ha aceptado el salto/);
+  assert.equal(button.disabled, true);
+  b.run('applyFullState("one", {sequence_running:true}); SETUPS = [{id:"one"}]; markDisconnected();');
+  assert.equal(button.disabled, true);
+});
 
 test('cada captura se actualiza y una descarga antigua no reaparece tras cambiar objetivo', () => {
   const b = browser();

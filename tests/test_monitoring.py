@@ -158,6 +158,35 @@ async def worker():
 
 
 @pytest.mark.asyncio
+async def test_advanced_sequence_state_requires_a_running_block_and_is_invalidated_on_finish(worker):
+    assert worker.state["sequence_running"] is False
+    worker.client.target = [{"GlobalTriggers": [{"Status": "RUNNING"}]}, {"Name": "Inicio", "Status": "CREATED"}]
+    await worker.poll()
+    assert worker.state["connected"] and worker.state["sequence_running"] is False
+
+    worker.client.target[1]["Status"] = "RUNNING"
+    await worker.poll()
+    assert worker.state["sequence_running"] is True
+    assert worker.state["target"]["key"] is None
+
+    async def stale_poll():
+        await worker.handle_event({"Event": "SEQUENCE-FINISHED"})
+        return worker.client.target
+
+    worker.client.get_sequence = stale_poll
+    await worker.poll()
+    assert worker.state["sequence_running"] is False
+    assert worker.wake.is_set()
+
+    worker.client.get_sequence = AsyncMock(return_value=worker.client.target)
+    await worker.poll()
+    assert worker.state["sequence_running"] is True
+    worker.client.get_sequence.side_effect = OSError("sin estado de secuencia")
+    await worker.poll()
+    assert worker.state["connected"] and worker.state["sequence_running"] is False
+
+
+@pytest.mark.asyncio
 async def test_worker_updates_every_capture_caches_site_and_survives_weather(worker):
     await worker.poll()
     assert worker.state["connected"] and worker.state["weather"] is None

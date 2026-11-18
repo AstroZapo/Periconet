@@ -1,5 +1,6 @@
-"""Cliente de solo lectura para Advanced API v2 de N.I.N.A."""
+"""Cliente para Advanced API v2 de N.I.N.A."""
 import math
+
 import httpx
 
 
@@ -31,15 +32,17 @@ class NinaClient:
         return self._read_json(response)
 
     @staticmethod
-    def _read_json(response):
+    def _read_json(response, *, require_success=False):
         try:
             data = response.json()
         except ValueError:
             response.raise_for_status()
             raise NinaError("Respuesta JSON no válida")
         if isinstance(data, dict) and data.get("Success") is False:
-            raise NinaError(str(data.get("Error") or "Advanced API rechazó la consulta"))
+            raise NinaError(str(data.get("Error") or "Advanced API rechazó la petición"))
         response.raise_for_status()
+        if require_success and (not isinstance(data, dict) or data.get("Success") is not True):
+            raise NinaError("Advanced API no confirmó la orden")
         return clean_numbers(data.get("Response", data) if isinstance(data, dict) else data)
 
     async def get_camera_info(self):
@@ -59,6 +62,16 @@ class NinaClient:
 
     async def get_sequence(self):
         return await self._get("/sequence/state")
+
+    async def skip_sequence_to_end(self):
+        response = await self.http.get(
+            self.base_url + "/sequence/skip",
+            params={"type": "ToEnd"},
+            headers={"Cache-Control": "no-cache, no-store"},
+        )
+        if response.status_code == 409:
+            response.raise_for_status()
+        self._read_json(response, require_success=True)
 
     async def get_history(self, **params):
         try:

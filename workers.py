@@ -21,7 +21,7 @@ def empty_target():
 
 def build_state(setup):
     return {"name": setup["name"], "connected": False, "camera": None, "mount": None,
-            "weather": None, "safety": None, "site": None, "night": None,
+            "weather": None, "safety": None, "site": None, "night": None, "sequence_running": False,
             "hfr_history": [], "target": empty_target(), "exposure": exposure_state(None),
             "latest_image_id": None, "latest_image_url": None,
             "guide_steps": [], "guide_seq": 0, "guiding_status": "desconectado", "pixel_scale": None}
@@ -31,6 +31,8 @@ class NinaWorker:
     def __init__(self, setup, state, broadcast, images, config):
         self.setup, self.state, self.broadcast, self.images, self.config = setup, state, broadcast, images, config
         self.client = NinaClient(setup["nina_host"], setup["nina_port"])
+        self.sequence_end_lock = asyncio.Lock()
+        self.sequence_status_version = 0
         self.tracker = CaptureTracker()
         self.wake = asyncio.Event()
         self.scheduler = None
@@ -80,8 +82,16 @@ class NinaWorker:
         self.scheduler = None
         self.clear_image()
         self.state.update(connected=False, camera=None, mount=None, weather=None, safety=None,
-                          site=None, night=None, hfr_history=[], target=empty_target(), exposure=exposure_state(None))
+                          site=None, night=None, sequence_running=False,
+                          hfr_history=[], target=empty_target(), exposure=exposure_state(None))
         await self.publish()
+
+    async def invalidate_sequence_status(self):
+        self.sequence_status_version += 1
+        self.wake.set()
+        if self.state["sequence_running"]:
+            self.state["sequence_running"] = False
+            await self.publish()
 
     async def poll(self):
         camera = await self.client.get_camera_info()
@@ -99,12 +109,19 @@ class NinaWorker:
             if site:
                 self.state["site"] = site
                 self.state["night"] = night_at_connection(site)
+        sequence_status_version = self.sequence_status_version
         sequence, mount, weather, safety = await asyncio.gather(
             self.optional("secuencia", self.client.get_sequence()),
             self.optional("montura", self.client.get_mount_info()),
             self.optional("meteorología", self.client.get_weather_info()),
             self.optional("seguridad", self.client.get_safety_info()))
         self.state.update(mount=mount, weather=weather, safety=safety)
+        if sequence_status_version == self.sequence_status_version:
+            # /sequence/state devuelve los bloques de la secuencia avanzada y sus estados.
+            self.state["sequence_running"] = isinstance(sequence, list) and any(
+                isinstance(block, dict) and str(block.get("Status", "")).casefold() == "running"
+                for block in sequence
+            )
         await self.set_target(active_target(sequence, self.scheduler))
         history = await self.optional("historial", self.read_history())
         if history is not None:
@@ -167,8 +184,9 @@ class NinaWorker:
             await self.set_target(target_from_data(event, "scheduler"))
         elif name in ("SEQUENCE-FINISHED", "SEQUENCE-STARTING"):
             self.scheduler = None
+            await self.invalidate_sequence_status()
             await self.set_target(None)
-        if name in ("IMAGE-SAVE", "TS-NEWTARGETSTART", "TS-TARGETSTART", "SEQUENCE-FINISHED", "SEQUENCE-STARTING"):
+        if name in ("IMAGE-SAVE", "TS-NEWTARGETSTART", "TS-TARGETSTART"):
             self.wake.set()
 
     async def events(self):

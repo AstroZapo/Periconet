@@ -35,6 +35,40 @@ function el(tag, cls, text) {
   return e;
 }
 
+function updateSequenceEndButton(setupId, button) {
+  const state = STATES[setupId];
+  const running = state?.connected === true && state.sequence_running === true;
+  button.disabled = !running || button.dataset.sending === "true";
+  button.title = running ? "Saltar al bloque final de la secuencia" : "Requiere una secuencia avanzada en curso";
+}
+
+async function skipSequenceToEnd(setup, button, status) {
+  if (button.disabled || !window.confirm(`¿Saltar al bloque final de la secuencia de «${setup.name}»?`)) return;
+  button.disabled = true;
+  button.dataset.sending = "true";
+  status.classList.remove("error");
+  status.textContent = "Enviando orden a NINA…";
+  try {
+    const response = await fetch(`${API_BASE}/api/setups/${encodeURIComponent(setup.id)}/sequence/to-end`, {
+      method: "POST",
+      headers: {"X-Periconet-Action": "sequence-to-end"},
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok !== true) {
+      status.classList.add("error");
+      status.textContent = result.detail || "No se pudo confirmar la orden.";
+      return;
+    }
+    status.textContent = "NINA ha aceptado el salto al bloque final.";
+  } catch {
+    status.classList.add("error");
+    status.textContent = "No se pudo confirmar la orden. Comprueba la secuencia antes de repetirla.";
+  } finally {
+    delete button.dataset.sending;
+    updateSequenceEndButton(setup.id, button);
+  }
+}
+
 function buildPanel(setup) {
   const panel = el("div", "panel");
   panel.id = `panel-${setup.id}`;
@@ -45,8 +79,18 @@ function buildPanel(setup) {
   left.appendChild(el("h2", null, setup.name));
   const badge = el("span", "badge", "sin datos");
   badge.id = `guiding-badge-${setup.id}`;
+  const actions = el("div", "panel-actions");
+  const endButton = el("button", "sequence-end-button", "Ir al fin de secuencia");
+  endButton.type = "button";
+  endButton.id = `sequence-end-${setup.id}`;
+  updateSequenceEndButton(setup.id, endButton);
+  const endStatus = el("div", "sequence-end-status");
+  endStatus.setAttribute("role", "status");
+  endButton.addEventListener("click", () => skipSequenceToEnd(setup, endButton, endStatus));
+  actions.appendChild(badge);
+  actions.appendChild(endButton);
   header.appendChild(left);
-  header.appendChild(badge);
+  header.appendChild(actions);
 
   const body = el("div", "panel-body");
 
@@ -136,6 +180,7 @@ function buildPanel(setup) {
   body.appendChild(dataCell);
 
   panel.appendChild(header);
+  panel.appendChild(endStatus);
   panel.appendChild(body);
   return panel;
 }
@@ -754,6 +799,8 @@ function applyFullState(setupId, update) {
   STATES[setupId] = state;
   if (previous?.target?.key !== state.target?.key) updateImage(setupId, null, null);
   updateConnectionDot(setupId, state.connected);
+  const endButton = document.getElementById(`sequence-end-${setupId}`);
+  if (endButton) updateSequenceEndButton(setupId, endButton);
   updateBadge(setupId, state.guiding_status || "sin datos");
   renderTargetInfo(setupId, state.target || {});
   updateImage(setupId, state.latest_image_url, state.latest_image_id);
@@ -1029,7 +1076,7 @@ let ws = null;
 function markDisconnected() {
   for (const setup of SETUPS) {
     const id = setup.id;
-    applyFullState(id, {connected:false, camera:null, mount:null, weather:null, safety:null,
+    applyFullState(id, {connected:false, sequence_running:false, camera:null, mount:null, weather:null, safety:null,
       target:{name:"Sin conexión", key:null}, latest_image_id:null, latest_image_url:null,
       exposure:{camera_state:"Desconectado", is_exposing:false}, guiding_status:"desconectado"});
   }

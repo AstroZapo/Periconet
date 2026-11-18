@@ -1,5 +1,6 @@
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app
+from clients.nina_client import NinaClient
 from workers import build_state
 
 
@@ -27,6 +29,72 @@ def isolated_app(tmp_path, monkeypatch):
 
 def payload(name="Uno", **kwargs):
     return {"setups": [{"name": name, "nina_host": "127.0.0.1", "phd2_host": "", **kwargs}]}
+
+
+@pytest.mark.asyncio
+async def test_sequence_to_end_only_sends_one_order_to_the_selected_nina(isolated_app):
+    requests = []
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def nina_api(request):
+        requests.append(request)
+        started.set()
+        await release.wait()
+        return httpx.Response(200, json={"Success": True, "Response": "Skipped"})
+
+    nina = NinaClient("nina-two", 1889)
+    await nina.close()
+    nina.http = httpx.AsyncClient(transport=httpx.MockTransport(nina_api))
+    other = AsyncMock()
+    app.WORKERS["one"] = other
+    worker = SimpleNamespace(client=nina, sequence_end_lock=asyncio.Lock(), wake=asyncio.Event())
+    app.WORKERS["two"] = worker
+    url = "/api/setups/two/sequence/to-end"
+    headers = {"X-Periconet-Action": "sequence-to-end"}
+    async with nina.http, httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
+        assert (await client.get(url)).status_code == 405
+        assert (await client.post(url)).status_code == 403
+        assert (await client.post("/api/setups/missing/sequence/to-end", headers=headers)).status_code == 404
+        order = asyncio.create_task(client.post(url, headers=headers))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            assert (await client.post(url, headers=headers)).status_code == 409
+        finally:
+            release.set()
+            response = await order
+        assert response.status_code == 200 and response.json() == {"ok": True}
+        assert worker.wake.is_set()
+    other.client.skip_sequence_to_end.assert_not_called()
+    assert [(request.method, str(request.url)) for request in requests] == [
+        ("GET", "http://nina-two:1889/v2/api/sequence/skip?type=ToEnd")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("nina_status", "body", "expected", "detail"), [
+    (409, {"Success": False, "Error": "Sequence not running"}, 409,
+     "NINA no tiene una secuencia avanzada en ejecución."),
+    (409, {"Success": False, "Error": "Sequence is not initialized"}, 409,
+     "El secuenciador avanzado de NINA no está inicializado."),
+    (409, {"Success": False, "Error": "Otro motivo de NINA"}, 409, "Otro motivo de NINA"),
+    (409, None, 409, "NINA rechazó el salto al bloque final de la secuencia."),
+    (200, {"Success": False, "Error": "Skip rejected"}, 502, "Skip rejected"),
+    (200, {}, 502, "Advanced API no confirmó la orden"),
+])
+async def test_sequence_to_end_reports_failure_when_nina_does_not_confirm(
+    isolated_app, nina_status, body, expected, detail,
+):
+    nina = NinaClient("nina", 1888)
+    await nina.close()
+    transport = httpx.MockTransport(lambda request: httpx.Response(nina_status, json=body))
+    nina.http = httpx.AsyncClient(transport=transport)
+    worker = SimpleNamespace(client=nina, sequence_end_lock=asyncio.Lock(), invalidate_sequence_status=AsyncMock())
+    app.WORKERS["one"] = worker
+    async with nina.http, httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
+        response = await client.post("/api/setups/one/sequence/to-end", headers={"X-Periconet-Action": "sequence-to-end"})
+    assert response.status_code == expected and response.json()["detail"] == detail
+    assert worker.invalidate_sequence_status.await_count == (nina_status == 409)
 
 
 @pytest.mark.asyncio
