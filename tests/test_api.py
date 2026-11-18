@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
 import json
+import re
+from base64 import b64decode
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app
+import cameras
 from clients.nina_client import NinaClient
 from workers import build_state
 
@@ -20,6 +24,7 @@ def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "IMAGES", {})
     monkeypatch.setattr(app, "WORKERS", {})
     monkeypatch.setattr(app, "TASKS", {})
+    monkeypatch.setattr(app, "CAMERA_DOWNLOADS", {})
     monkeypatch.setattr(app, "FRONTEND_CLIENTS", {})
     monkeypatch.setattr(app, "CONFIG_LOCK", asyncio.Lock())
     monkeypatch.setattr(app, "start_setup", lambda setup: None)
@@ -185,3 +190,182 @@ def test_websocket_snapshot_and_cleanup(isolated_app):
             first = ws.receive_json()
             assert first["type"] == "initial_state" and "one" in first["state"]
         assert not app.FRONTEND_CLIENTS
+
+
+@pytest.fixture
+def camera_store(monkeypatch):
+    credentials = {}
+    monkeypatch.setattr(app.camera_credentials, "read", credentials.get)
+    monkeypatch.setattr(app.camera_credentials, "write", lambda key, user, password: credentials.update({key: (user, password)}))
+    monkeypatch.setattr(app.camera_credentials, "delete", lambda key: credentials.pop(key, None))
+    return credentials
+
+
+@pytest.mark.asyncio
+async def test_setup_serves_the_current_script_and_saves_cameras_with_other_settings(isolated_app, camera_store):
+    transport = httpx.ASGITransport(app=app.app)
+    headers = {"X-Periconet-Action": "camera-setup"}
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+        for path in ("/", "/setup"):
+            page = await client.get(path)
+            script_url = re.search(r'src="(/static/setup\.js\?v=[a-f0-9]+)"', page.text)[1]
+            script = await client.get(script_url)
+            assert script_url.endswith(hashlib.sha256(script.content).hexdigest()[:16])
+            assert page.text.index('id="add-camera"') < page.text.index('id="save-settings"')
+
+        revision = (await client.get("/api/setup/cameras", headers=headers)).json()["revision"]
+        settings = payload("Artec 250E") | {
+            "observatory_name": "Menelmacar",
+            "camera_settings": {"revision": revision, "cameras": [{
+                "name": "Monturas", "url": "http://camera/picture",
+                "username": "visor", "password": "test-secret",
+            }]},
+        }
+        assert (await client.post("/api/setup", json=settings)).status_code == 403
+        plain = await client.post("/api/setup", content=json.dumps(payload()), headers={"Content-Type": "text/plain"})
+        assert plain.status_code == 422
+        invalid = dict(settings, setups=None)
+        rejected = await client.post("/api/setup", headers=headers, json=invalid)
+        assert rejected.status_code == 422 and "test-secret" not in rejected.text
+        assert not app.CONFIG_PATH.exists() and not camera_store
+
+        saved = await client.post("/api/setup", headers=headers, json=settings)
+        assert saved.status_code == 200 and "test-secret" not in saved.text
+        assert saved.json()["camera_settings"]["cameras"][0]["has_credentials"]
+        assert list(camera_store.values()) == [("visor", "test-secret")]
+        config = json.loads(app.CONFIG_PATH.read_bytes())
+        assert config["setups"][0]["name"] == "Artec 250E"
+        assert config["cameras"][0]["name"] == "Monturas"
+        assert "test-secret" not in app.CONFIG_PATH.read_text(encoding="utf-8")
+
+        unrelated = await client.post("/api/setup", json={"setups": saved.json()["setups"]})
+        assert unrelated.status_code == 200
+        assert app.CONFIG["cameras"] == config["cameras"]
+
+
+@pytest.mark.asyncio
+async def test_camera_configuration_keeps_credentials_private_and_rotates_atomically(isolated_app, camera_store, monkeypatch):
+    transport = httpx.ASGITransport(app=app.app)
+    endpoint = "/api/setup/cameras"
+    headers = {"X-Periconet-Action": "camera-setup"}
+    camera = {"name": "Monturas", "url": "http://camera/ISAPI/Streaming/channels/1/picture",
+              "username": "viewer-test", "password": "fake-password", "refresh_seconds": 12}
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+        revision = (await client.get(endpoint, headers=headers)).json()["revision"]
+        assert (await client.get(endpoint)).status_code == 403
+        assert (await client.get(endpoint, headers=headers | {"Origin": "http://otro-sitio"})).status_code == 403
+        assert (await client.get(endpoint, headers=headers | {"X-Forwarded-Host": "localhost"})).status_code == 403
+        assert (await client.get("http://periconet.lan" + endpoint, headers=headers)).status_code == 403
+        async def save(*items):
+            return await client.post(endpoint, headers=headers, json={"revision": revision, "cameras": items})
+
+        invalid = await save(dict(camera, url="http://viewer-test:fake-password@camera/snapshot"))
+        assert invalid.status_code == 422 and "fake-password" not in invalid.text
+        assert (await save(camera, camera)).status_code == 422
+        created = await save(camera)
+        assert created.status_code == 200
+        info = created.json()["cameras"][0]
+        assert info["has_credentials"] and "fake-password" not in created.text
+        assert "viewer-test" not in created.text
+        assert (await save(camera)).status_code == 409
+        on_disk = app.CONFIG_PATH.read_text(encoding="utf-8")
+        assert "fake-password" not in on_disk and "viewer-test" not in on_disk
+        assert list(camera_store.values()) == [("viewer-test", "fake-password")]
+        assert (await client.get("/api/config")).json()["cameras"] == [
+            {"id": info["id"], "name": "Monturas", "refresh_seconds": 12}
+        ]
+        assert "observatory-title" in (await client.get("/")).text
+
+        revision = created.json()["revision"]
+        edited = {key: info[key] for key in ("id", "name", "url", "refresh_seconds")}
+        assert (await save(dict(edited, url="http://different-camera/snapshot"))).status_code == 422
+        retained = await save(dict(edited, name="Techo"))
+        assert retained.status_code == 200 and list(camera_store.values()) == [("viewer-test", "fake-password")]
+        revision = retained.json()["revision"]
+        edited["name"] = "Techo"
+
+        def fail_save(*args):
+            raise OSError("disk error")
+
+        with monkeypatch.context() as failed_write:
+            failed_write.setattr(app.os, "replace", fail_save)
+            response = await save(dict(edited, password="next-password"))
+            assert response.status_code == 500 and "next-password" not in response.text
+        assert list(camera_store.values()) == [("viewer-test", "fake-password")]
+        rotated = await save(dict(edited, password="next-password"))
+        assert rotated.status_code == 200
+        assert list(camera_store.values()) == [("viewer-test", "next-password")]
+        revision = rotated.json()["revision"]
+        deleted = await save()
+        assert deleted.status_code == 200 and deleted.json()["cameras"] == [] and not camera_store
+
+    remote = httpx.ASGITransport(app=app.app, client=("192.0.2.20", 8000))
+    async with httpx.AsyncClient(transport=remote, base_url="http://localhost:8000") as client:
+        assert (await client.get(endpoint, headers=headers)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_camera_snapshot_shares_one_download_and_is_independent_of_other_cameras(isolated_app, monkeypatch):
+    first = {"id": "1" * 32, "name": "Lenta", "url": "http://camera-one/snapshot", "credential_id": None}
+    second = {"id": "2" * 32, "name": "Disponible", "url": "http://camera-two/snapshot", "credential_id": None}
+    app.CONFIG["cameras"] = [first, second]
+    started, release = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def download(camera):
+        calls.append(camera["id"])
+        if camera is first:
+            started.set()
+            await release.wait()
+            return None
+        return b"\xff\xd8\xfftest"
+
+    monkeypatch.setattr(app, "download_snapshot", download)
+    transport = httpx.ASGITransport(app=app.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://periconet.lan") as client:
+        first_url = f"/api/cameras/{first['id']}/snapshot"
+        pending = asyncio.create_task(client.get(first_url))
+        await asyncio.wait_for(started.wait(), 1)
+        second_viewer = asyncio.create_task(client.get(first_url))
+        try:
+            ready = await asyncio.wait_for(client.get(f"/api/cameras/{second['id']}/snapshot"), 1)
+            assert ready.status_code == 200 and ready.headers["cache-control"] == "no-store"
+            assert ready.headers["content-type"] == "image/jpeg"
+            assert calls == [first["id"], second["id"]]
+        finally:
+            release.set()
+            results = await asyncio.gather(pending, second_viewer)
+        assert [response.status_code for response in results] == [502, 502]
+        assert not app.CAMERA_DOWNLOADS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scheme", ["Basic", "Digest"])
+async def test_camera_download_responds_to_auth_challenge_and_requires_a_jpeg(camera_store, monkeypatch, scheme):
+    reference = "1" * 32
+    camera_store[reference] = ("visor", "clave-prueba")
+    challenge = 'Basic realm="camera"'
+    if scheme == "Digest":
+        challenge = 'Digest realm="camera", nonce="test", qop="auth", algorithm=MD5'
+    response_bytes = b"\xff\xd8\xfftest"
+    calls = []
+
+    def camera_api(request):
+        authorization = request.headers.get("Authorization")
+        calls.append(authorization)
+        if not authorization:
+            return httpx.Response(401, headers={"WWW-Authenticate": challenge})
+        return httpx.Response(200, content=response_bytes)
+
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(camera_api)
+    monkeypatch.setattr(cameras.httpx, "AsyncClient", lambda **kwargs: client(transport=transport, **kwargs))
+    camera = {"url": "http://camera/snapshot", "credential_id": reference}
+    assert await cameras.download_snapshot(camera) == response_bytes
+    assert len(calls) == 2 and calls[0] is None and calls[1].startswith(scheme + " ")
+    if scheme == "Basic":
+        assert b64decode(calls[1].split(" ", 1)[1]) == b"visor:clave-prueba"
+    else:
+        assert 'username="visor"' in calls[1] and "clave-prueba" not in calls[1]
+    response_bytes = b"<html>Inicio de sesion</html>"
+    assert await cameras.download_snapshot(camera) is None

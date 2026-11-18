@@ -1025,9 +1025,16 @@ async function init() {
   SETUPS.forEach(s => container.appendChild(buildPanel(s)));
 
   const extras = document.getElementById("extras");
+  const cameraCard = config.cameras?.length ? buildCameraCard(config.cameras) : null;
   (config.extra_images || []).forEach((img, i) => {
     if (img.url) extras.appendChild(buildExtraCard(img, i));
+    if (i === 1 && cameraCard) extras.appendChild(cameraCard);
   });
+  if (cameraCard) {
+    if (!cameraCard.parentNode) extras.appendChild(cameraCard);
+    extras.classList.add("with-cameras");
+    extras.style.setProperty("--extra-columns", Math.min(3, extras.childElementCount));
+  }
 
   connectWebSocket();
   startWatchdog();
@@ -1035,6 +1042,35 @@ async function init() {
   setInterval(() => {
     document.getElementById("clock").textContent = new Date().toLocaleTimeString("es-ES");
   }, 1000);
+}
+
+function pollImage(url, seconds, onImage, onError) {
+  let timer = null;
+  let pending = false;
+  const refresh = () => {
+    if (pending) return;
+    pending = true;
+    const probe = new Image();
+    probe.onload = () => {
+      pending = false;
+      if (timer !== null) onImage(probe);
+    };
+    probe.onerror = () => {
+      pending = false;
+      if (timer !== null) onError();
+    };
+    probe.src = `${url}?t=${Date.now()}`;
+  };
+  return active => {
+    if (active === (timer !== null)) return;
+    if (active) {
+      timer = setInterval(refresh, Math.max(10, seconds) * 1000);
+      refresh();
+    } else {
+      clearInterval(timer);
+      timer = null;
+    }
+  };
 }
 
 function buildExtraCard(img, index) {
@@ -1048,26 +1084,124 @@ function buildExtraCard(img, index) {
   card.appendChild(header);
   card.appendChild(body);
 
-  const refresh = () => {
-    const probe = new Image();
-    const targetSrc = `${API_BASE}/api/extra-image/${index}?t=${Date.now()}`;
-    probe.onload = () => {
+  pollImage(
+    `${API_BASE}/api/extra-image/${index}`, img.refresh_seconds || 60,
+    probe => {
       probe.alt = img.title || "";
       body.replaceChildren(probe);
       upd.textContent = new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
-    };
-    probe.onerror = () => {
-      // Si ya había una imagen la dejamos (mejor una vieja que nada)
+    },
+    () => {
       if (!body.querySelector("img")) {
-        body.innerHTML = "";
-        body.appendChild(el("span", "placeholder", "imagen no disponible"));
+        body.replaceChildren(el("span", "placeholder", "imagen no disponible"));
       }
       upd.textContent = "sin conexión";
-    };
-    probe.src = targetSrc;
-  };
-  refresh();
-  setInterval(refresh, Math.max(10, img.refresh_seconds || 60) * 1000);
+    }
+  )(true);
+  return card;
+}
+
+function cameraTile(camera) {
+  const tile = el("figure", "camera-tile");
+  const photo = el("div", "camera-photo");
+  const caption = el("figcaption", "camera-caption");
+  const name = el("span", "camera-name", camera.name);
+  name.title = camera.name;
+  const status = el("span", "camera-state", "Cargando…");
+  caption.appendChild(name);
+  caption.appendChild(status);
+  tile.appendChild(photo);
+  tile.appendChild(caption);
+  let lastUpdate = "";
+  const setActive = pollImage(
+    `${API_BASE}/api/cameras/${encodeURIComponent(camera.id)}/snapshot`, camera.refresh_seconds,
+    probe => {
+      probe.alt = `Captura de ${camera.name}`;
+      photo.replaceChildren(probe);
+      lastUpdate = new Date().toLocaleTimeString("es-ES");
+      status.textContent = lastUpdate;
+      tile.dataset.state = "ok";
+    },
+    () => {
+      status.textContent = lastUpdate ? `Sin conexión · Última imagen ${lastUpdate}` : "Imagen no disponible";
+      tile.dataset.state = "offline";
+    }
+  );
+  return {tile, setActive};
+}
+
+function cameraChoice(label, choices) {
+  const option = el("label", "camera-choice");
+  const input = el("input");
+  input.type = "checkbox";
+  input.checked = true;
+  option.appendChild(input);
+  option.appendChild(el("span", null, label));
+  choices.appendChild(option);
+  return input;
+}
+
+function buildCameraCard(cameras) {
+  const card = el("div", "extra-card camera-card");
+  const header = el("div", "panel-header");
+  header.appendChild(el("h2", null, "Cámaras"));
+  const frame = el("div", "camera-frame");
+  const entries = cameras.map(camera => ({name: camera.name, ...cameraTile(camera)}));
+  card.appendChild(header);
+  card.appendChild(frame);
+
+  if (entries.length === 1) {
+    const row = el("div", "camera-row");
+    row.appendChild(entries[0].tile);
+    frame.appendChild(row);
+    entries[0].setActive(true);
+    return card;
+  }
+
+  const picker = el("details", "camera-picker");
+  const summary = el("summary", "camera-summary");
+  const choices = el("div", "camera-choices");
+  const all = cameraChoice("Todas las cámaras", choices);
+  entries.forEach(entry => { entry.input = cameraChoice(entry.name, choices); });
+  picker.appendChild(summary);
+  picker.appendChild(choices);
+  header.appendChild(picker);
+
+  function renderSelection() {
+    const visible = entries.filter(entry => entry.input.checked);
+    const count = visible.length;
+    all.checked = count === entries.length;
+    all.indeterminate = count > 0 && !all.checked;
+    summary.textContent = all.checked ? "Todas las cámaras"
+      : count === 1 ? visible[0].name : count ? `${count} seleccionadas` : "Seleccionar cámaras";
+    summary.title = summary.textContent;
+    const rows = [];
+    const columns = Math.ceil(Math.sqrt(count));
+    for (let index = 0; index < count; index += columns) {
+      const row = el("div", "camera-row");
+      visible.slice(index, index + columns).forEach(entry => row.appendChild(entry.tile));
+      rows.push(row);
+    }
+    frame.replaceChildren(...rows);
+    if (!count) frame.appendChild(el("p", "camera-empty", "Selecciona al menos una cámara"));
+    entries.forEach(entry => entry.setActive(entry.input.checked));
+  }
+
+  all.addEventListener("change", () => {
+    entries.forEach(entry => { entry.input.checked = all.checked; });
+    renderSelection();
+  });
+  entries.forEach(entry => entry.input.addEventListener("change", renderSelection));
+  picker.addEventListener("keydown", event => {
+    if (event.key === "Escape" && picker.open) {
+      picker.open = false;
+      summary.focus();
+    }
+  });
+  document.addEventListener("click", event => {
+    if (picker.open && !picker.contains(event.target)) picker.open = false;
+  });
+  renderSelection();
   return card;
 }
 

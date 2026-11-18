@@ -7,6 +7,8 @@ const vm = require('node:vm');
 function browser() {
   const elements = new Map();
   const images = [];
+  const intervals = new Map();
+  let intervalId = 0;
   class Element {
     constructor(tag = 'div') {
       this.tag = tag; this.style = {}; this.dataset = {}; this.children = []; this.textContent = '';
@@ -25,11 +27,15 @@ function browser() {
   }
   const context = vm.createContext({console, Date, Math, JSON, Object, Number, String, Array, Set, Promise,
     document:{getElementById(id) { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
-      createElement: tag => new Element(tag), body:new Element()},
+      createElement: tag => new Element(tag), body:new Element(), addEventListener(){}},
     localStorage:{getItem(){return 'off';}},
     window:{addEventListener(){}, devicePixelRatio:1},
     getComputedStyle(){return {fontFamily:'monospace'};},
-    setInterval(){return 1;}, clearInterval(){}, setTimeout(){},
+    setInterval(callback, delay) {
+      intervals.set(++intervalId, {callback, delay});
+      return intervalId;
+    },
+    clearInterval(id) { intervals.delete(id); }, setTimeout(){},
     Image: class extends Element { constructor() { super('img'); images.push(this); } },
     location:{protocol:'http:', host:'localhost', reload(){}},
     WebSocket:class {constructor(){context.socket = this;}},
@@ -37,7 +43,7 @@ function browser() {
   });
   const source = fs.readFileSync('frontend/dashboard.js','utf8').split('init().catch')[0];
   vm.runInContext(source, context);
-  return {context, images, elements, run:code => vm.runInContext(code,context)};
+  return {context, images, elements, intervals, run:code => vm.runInContext(code,context)};
 }
 
 test('el botón de fin de secuencia pide confirmación y muestra la respuesta de NINA', async () => {
@@ -155,4 +161,57 @@ test('la gráfica dibuja la curva roja y muestra hora y altura de culminación e
   const localNoon = new Date("2000-01-01T12:00:00Z").toLocaleTimeString("es-ES", {hour: "2-digit", minute: "2-digit"});
   assert.ok(strokes.includes('#f43f5e'));
   assert.ok(labels.some(({label, x}) => label === `Culm. ${localNoon} · 44.5°` && Math.abs(x - 132.5) < 1));
+});
+
+test('las cámaras seleccionadas forman el mosaico y un fallo conserva el nombre y la última imagen', () => {
+  const b = browser();
+  b.intervals.clear();
+  const card = b.run(`buildCameraCard([
+    {id:"one", name:"Monturas", refresh_seconds:10},
+    {id:"two", name:"Techo", refresh_seconds:15},
+    {id:"three", name:"Entrada", refresh_seconds:20},
+    {id:"four", name:"Vista general", refresh_seconds:30}
+  ])`);
+  const [header, frame] = card.children;
+  const [summary, choices] = header.children[1].children;
+  const [all, mounts, roof, entrance, overview] = choices.children.map(label => label.children[0]);
+  const tileNames = () => frame.children.flatMap(row => row.children.map(tile => tile.children[1].children[0].textContent));
+  const tick = delay => [...b.intervals.values()].find(timer => timer.delay === delay).callback();
+  assert.deepEqual(frame.children.map(row => row.children.length), [2, 2]);
+  assert.deepEqual(tileNames(), ['Monturas', 'Techo', 'Entrada', 'Vista general']);
+  assert.equal(b.images.length, 4);
+  tick(10000);
+  assert.equal(b.images.length, 4, 'no inicia un refresco hasta terminar la captura anterior');
+
+  roof.checked = false;
+  roof.listeners.change();
+  overview.checked = false;
+  overview.listeners.change();
+  assert.equal(summary.textContent, '2 seleccionadas');
+  assert.deepEqual(tileNames(), ['Monturas', 'Entrada']);
+  assert.deepEqual([...b.intervals.values()].map(timer => timer.delay), [10000, 20000]);
+  assert.equal(all.indeterminate, true);
+
+  const [mountTile, entranceTile] = frame.children[0].children;
+  const staleImage = b.images[0];
+  staleImage.onload();
+  tick(10000);
+  b.images[4].onerror();
+  b.images[2].onerror();
+  assert.equal(mountTile.children[0].children[0], staleImage);
+  assert.match(mountTile.children[1].children[1].textContent, /Sin conexión · Última imagen/);
+  assert.equal(entranceTile.children[1].children[0].textContent, 'Entrada');
+  assert.equal(entranceTile.children[1].children[1].textContent, 'Imagen no disponible');
+
+  mounts.checked = false;
+  mounts.listeners.change();
+  assert.equal(summary.textContent, 'Entrada');
+  entrance.checked = false;
+  entrance.listeners.change();
+  assert.equal(frame.children[0].textContent, 'Selecciona al menos una cámara');
+  assert.equal(b.intervals.size, 0);
+  all.checked = true;
+  all.listeners.change();
+  assert.deepEqual(frame.children.map(row => row.children.length), [2, 2]);
+  assert.equal(b.intervals.size, 4);
 });

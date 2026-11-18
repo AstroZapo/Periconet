@@ -22,6 +22,10 @@
     text-transform: uppercase; font-size: 1.2rem; margin-bottom: 4px;
   }
   p.subtitle { color: var(--text-dim); margin-top: 0; margin-bottom: 28px; }
+  .section-title {
+    font-family: var(--mono); font-size: 0.85rem; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--text-dim); margin: 8px 0 10px;
+  }
   .setup-card {
     background: var(--panel); border: 1px solid var(--panel-border);
     border-radius: 6px; padding: 16px; margin-bottom: 14px; position: relative;
@@ -55,7 +59,19 @@
     width: 100%; padding: 12px; font-size: 0.85rem;
   }
   button.primary:hover, button.add:hover { opacity: 0.9; }
+  button.add:disabled { opacity: 0.6; cursor: default; }
   #status { margin-top: 16px; font-family: var(--mono); font-size: 0.85rem; color: var(--ok); display: none; }
+  #camera-settings fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+  #camera-settings .camera-help { font-size: 0.8rem; color: var(--text-dim); }
+  #camera-settings .camera-status.error { color: #ffaaaa; }
+  #camera-settings .camera-card > label:first-of-type { margin-right: 24px; }
+  #camera-settings .row label { margin-top: 0; }
+  #camera-settings .camera-card label input { display: block; margin-top: 4px; }
+  #camera-settings .camera-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  #camera-settings .camera-card .camera-credential-remove input { display: inline; width: auto; margin-right: 4px; }
+  @media (max-width: 480px) {
+    #camera-settings .row { grid-template-columns: 1fr; }
+  }
 </style>
 </head>
 <body>
@@ -74,7 +90,7 @@
 
   <button class="add" onclick="addSetup()">+ Añadir setup</button>
 
-  <h2 style="font-family:var(--mono);font-size:0.85rem;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-dim);margin:8px 0 10px;">Imágenes bajo los setups (opcional)</h2>
+  <h2 class="section-title">Imágenes bajo los setups (opcional)</h2>
   <div class="setup-card" id="extra-0">
     <label>Título · gráfico de seeing</label>
     <input class="x-title" placeholder="Seeing de la noche">
@@ -93,8 +109,42 @@
   </div>
   <div style="font-size:0.72rem;color:var(--text-dim);margin:-6px 0 20px;">Deja la URL vacía para no mostrar esa imagen. La descarga Periconet desde este PC, así que sirve también una URL accesible solo por VPN.</div>
 
-  <button class="primary" onclick="save()">Guardar configuración</button>
+  <section id="camera-settings" aria-labelledby="camera-settings-title">
+    <h2 id="camera-settings-title" class="section-title">Cámaras del observatorio (opcional)</h2>
+    <p id="camera-status" class="camera-help camera-status" role="status">Cargando configuración de cámaras…</p>
+    <fieldset id="camera-fields">
+      <div id="camera-entries"></div>
+      <button id="add-camera" class="add" type="button" disabled>+ Añadir cámara</button>
+    </fieldset>
+    <template id="camera-template">
+      <div class="setup-card camera-card">
+        <button class="remove" type="button" aria-label="Quitar cámara">✕</button>
+        <label>Nombre de la cámara
+          <input class="camera-name" required maxlength="100" placeholder="Monturas">
+        </label>
+        <div class="row">
+          <label>URL de captura JPEG
+            <input class="camera-url" type="url" required maxlength="2048" placeholder="http://…/ISAPI/Streaming/channels/1/picture">
+          </label>
+          <label>Refresco (s)
+            <input class="camera-interval" type="number" required min="10" max="86400" step="1" value="10">
+          </label>
+        </div>
+        <div class="row camera-options">
+          <label>Usuario
+            <input class="camera-user" maxlength="128" autocomplete="off">
+          </label>
+          <label>Contraseña
+            <input class="camera-password" type="password" maxlength="256" autocomplete="new-password">
+          </label>
+        </div>
+        <p class="camera-help camera-credential-status" hidden></p>
+        <label class="camera-credential-remove" hidden><input type="checkbox"> Quitar credenciales guardadas</label>
+      </div>
+    </template>
+  </section>
 
+  <button id="save-settings" class="primary" onclick="save()">Guardar configuración</button>
   <div id="status"></div>
 </div>
 

@@ -4,6 +4,7 @@
   "description": "Dashboard para observatorios remotos",
   "private": true,
   "scripts": {
-    "test": "node --test tests/dashboard.test.cjs"
+    "test": "node --test tests/dashboard.test.cjs",
+    "build": "build.bat"
   }
 }

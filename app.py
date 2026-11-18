@@ -14,11 +14,34 @@ from pathlib import Path
 from typing import Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
+import camera_credentials
+from cameras import (
+    CamerasPayload,
+    StoredCamera,
+    check_unique,
+    download_snapshot,
+    prepare_cameras,
+)
 from clients.nina_client import NinaError
 from monitoring import active_target, fingerprint
 from workers import NinaWorker, build_state, phd2_loop
@@ -80,6 +103,7 @@ class SetupsPayload(BaseModel):
     setups: list[SetupInput]
     extra_images: list[ExtraImageInput] | None = None
     port: int | None = Field(default=None, ge=1024, le=65535)
+    camera_settings: CamerasPayload | None = None
 
     @model_validator(mode="after")
     def unique(self):
@@ -93,13 +117,20 @@ class SetupsPayload(BaseModel):
 
 
 DEFAULT_CONFIG = {"poll_interval_seconds": 5, "hfr_history_points": 60,
-                  "observatory_name": "", "port": 8000, "setups": [], "extra_images": []}
+                  "observatory_name": "", "port": 8000, "setups": [], "extra_images": [], "cameras": []}
 CONFIG = dict(DEFAULT_CONFIG)
 if CONFIG_PATH.exists():
     try:
         CONFIG.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig")))
         parsed = SetupsPayload.model_validate(CONFIG)
         CONFIG["setups"] = [dict(s.model_dump(), id=s.id or uuid.uuid4().hex) for s in parsed.setups]
+        try:
+            cameras = TypeAdapter(list[StoredCamera]).validate_python(CONFIG["cameras"])
+        except ValidationError as exc:
+            details = ", ".join(".".join(map(str, error["loc"])) for error in exc.errors(include_input=False))
+            raise RuntimeError(f"Configuración de cámaras inválida en {CONFIG_PATH}: {details}") from None
+        check_unique(cameras)
+        CONFIG["cameras"] = [camera.model_dump() for camera in cameras]
         CONFIG["poll_interval_seconds"] = max(1, float(CONFIG["poll_interval_seconds"]))
         CONFIG["hfr_history_points"] = max(1, int(CONFIG["hfr_history_points"]))
     except (ValueError, TypeError) as exc:
@@ -109,6 +140,7 @@ STATE = {s["id"]: build_state(s) for s in CONFIG["setups"]}
 IMAGES = {}
 WORKERS = {}
 TASKS = {}
+CAMERA_DOWNLOADS = {}
 FRONTEND_CLIENTS = {}
 CONFIG_LOCK = asyncio.Lock()
 SERVER_PORT = CONFIG["port"]
@@ -174,6 +206,11 @@ async def lifespan(app):
             start_setup(setup)
         yield
     finally:
+        downloads = [task for _, task in CAMERA_DOWNLOADS.values()]
+        for task in downloads:
+            task.cancel()
+        await asyncio.gather(*downloads, return_exceptions=True)
+        CAMERA_DOWNLOADS.clear()
         for key in list(TASKS):
             await stop_setup(key)
 
@@ -182,7 +219,11 @@ app = FastAPI(title="Periconet", lifespan=lifespan)
 
 
 @app.post("/api/setup")
-async def save_setup(payload: SetupsPayload):
+async def save_setup(request: Request, response: Response):
+    data = await read_setup_json(request)
+    if isinstance(data, dict) and data.get("camera_settings") is not None:
+        require_camera_admin(request)
+    payload = validate_setup_payload(SetupsPayload, data)
     async with CONFIG_LOCK:
         old = {s["id"]: s for s in CONFIG["setups"]}
         setups = []
@@ -197,11 +238,15 @@ async def save_setup(payload: SetupsPayload):
             new["port"] = payload.port
         if payload.extra_images is not None:
             new["extra_images"] = [e.model_dump() for e in payload.extra_images]
-        try:
-            save_config(new)
-        except OSError as exc:
-            logger.error("No se pudo guardar configuración: %s", exc)
-            raise HTTPException(500, "No se pudo guardar la configuración en disco") from exc
+        retired_credentials = set()
+        if payload.camera_settings is not None:
+            retired_credentials = persist_camera_config(new, payload.camera_settings)
+        else:
+            try:
+                save_config(new)
+            except OSError as exc:
+                logger.error("No se pudo guardar configuración: %s", exc)
+                raise HTTPException(500, "No se pudo guardar la configuración en disco") from exc
         new_by_id = {s["id"]: s for s in setups}
         endpoints = ("nina_host", "nina_port", "phd2_host", "phd2_port")
         restart = {key for key, s in old.items() if key not in new_by_id or
@@ -211,6 +256,7 @@ async def save_setup(payload: SetupsPayload):
             STATE.pop(key, None)
         CONFIG.clear()
         CONFIG.update(new)
+        forget_camera_credentials(retired_credentials)
         for setup in setups:
             key = setup["id"]
             if key not in STATE:
@@ -220,13 +266,127 @@ async def save_setup(payload: SetupsPayload):
             if key in WORKERS:
                 WORKERS[key].setup = setup
         await broadcast({"type": "config_changed", "revision": config_revision()})
-        return {"ok": True, "setups": setups, "restart_required": new["port"] != SERVER_PORT,
-                "port": new["port"]}
+        result = {"ok": True, "setups": setups, "restart_required": new["port"] != SERVER_PORT,
+                  "port": new["port"]}
+        if payload.camera_settings is not None:
+            response.headers["Cache-Control"] = "no-store"
+            result["camera_settings"] = camera_admin_settings()
+        return result
 
 
 @app.get("/api/config")
 async def get_config():
-    return {key: CONFIG.get(key) for key in ("setups", "observatory_name", "extra_images", "port")} | {"revision": config_revision()}
+    return {key: CONFIG.get(key) for key in ("setups", "observatory_name", "extra_images", "port")} | {
+        "revision": config_revision(),
+        "cameras": [
+            {key: camera[key] for key in ("id", "name", "refresh_seconds")} for camera in CONFIG["cameras"]
+        ],
+    }
+
+
+def require_camera_admin(request: Request):
+    origin = request.headers.get("origin")
+    local_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if (
+        request.client is None or request.client.host not in ("127.0.0.1", "::1")
+        or request.url.hostname not in ("localhost", "127.0.0.1", "::1")
+        or any(
+            header in request.headers
+            for header in ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto")
+        )
+        or (origin is not None and origin != local_origin)
+        or request.headers.get("X-Periconet-Action") != "camera-setup"
+    ):
+        raise HTTPException(403, "Abre la configuración de cámaras desde localhost en el PC de Periconet.")
+
+
+def camera_admin_settings():
+    cameras = []
+    for camera in CONFIG["cameras"]:
+        credential_id = camera["credential_id"]
+        has_credentials = False
+        if credential_id:
+            try:
+                has_credentials = camera_credentials.read(credential_id) is not None
+            except (OSError, ValueError):
+                pass
+        cameras.append(
+            {key: camera[key] for key in ("id", "name", "url", "refresh_seconds")}
+            | {"has_credentials": has_credentials, "credentials_missing": bool(credential_id and not has_credentials)}
+        )
+    return {"cameras": cameras, "revision": fingerprint(CONFIG["cameras"])}
+
+
+@app.get("/api/setup/cameras", dependencies=[Depends(require_camera_admin)])
+async def get_camera_setup(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return camera_admin_settings()
+
+
+def forget_camera_credentials(ids):
+    for credential_id in ids:
+        try:
+            camera_credentials.delete(credential_id)
+        except OSError:
+            logger.warning("No se pudo eliminar una credencial de cámara del almacén de Windows")
+
+
+async def read_setup_json(request):
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type and content_type != "application/json" and not (
+        content_type.startswith("application/") and content_type.endswith("+json")
+    ):
+        raise HTTPException(422, "La configuración debe enviarse como JSON.")
+    try:
+        return await request.json()
+    except ValueError:
+        raise HTTPException(422, "La configuración no es válida.") from None
+
+
+def validate_setup_payload(model, data):
+    try:
+        return model.model_validate(data)
+    except ValidationError as exc:
+        errors = exc.errors(include_input=False, include_context=False, include_url=False)
+        raise HTTPException(422, errors) from None
+
+
+def persist_camera_config(config, payload):
+    if payload.revision != fingerprint(CONFIG["cameras"]):
+        raise HTTPException(409, "La configuración de cámaras ha cambiado. Recarga la página.")
+    existing = {camera["id"]: camera for camera in CONFIG["cameras"]}
+    try:
+        cameras, pending = prepare_cameras(payload.cameras, existing)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except OSError:
+        raise HTTPException(500, "No se pudo leer el almacén de credenciales de Windows.") from None
+    written = []
+    config["cameras"] = cameras
+    try:
+        for credential_id, (username, password) in pending.items():
+            camera_credentials.write(credential_id, username, password)
+            written.append(credential_id)
+        save_config(config)
+    except (OSError, ValueError):
+        forget_camera_credentials(written)
+        raise HTTPException(500, "No se pudieron guardar las cámaras o sus credenciales en Windows.") from None
+    old_ids = {camera["credential_id"] for camera in existing.values() if camera["credential_id"]}
+    new_ids = {camera["credential_id"] for camera in cameras}
+    return old_ids - new_ids
+
+
+@app.post("/api/setup/cameras", dependencies=[Depends(require_camera_admin)])
+async def save_camera_setup(request: Request, response: Response):
+    payload = validate_setup_payload(CamerasPayload, await read_setup_json(request))
+    async with CONFIG_LOCK:
+        new = dict(CONFIG)
+        retired_credentials = persist_camera_config(new, payload)
+        CONFIG["cameras"] = new["cameras"]
+        forget_camera_credentials(retired_credentials)
+        await broadcast({"type": "config_changed", "revision": config_revision()})
+        response.headers["Cache-Control"] = "no-store"
+        return camera_admin_settings()
 
 
 @app.get("/api/setups")
@@ -342,6 +502,35 @@ async def get_extra_image(index: int, request: Request):
         return Response(status_code=502)
 
 
+async def capture_camera(camera):
+    try:
+        return await download_snapshot(camera)
+    finally:
+        CAMERA_DOWNLOADS.pop(camera["id"], None)
+
+
+@app.get("/api/cameras/{camera_id}/snapshot")
+async def get_camera_snapshot(camera_id: str):
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    camera = next((item for item in CONFIG["cameras"] if item["id"] == camera_id), None)
+    if camera is None:
+        return Response(status_code=404, headers=headers)
+    active = CAMERA_DOWNLOADS.get(camera_id)
+    if active is None:
+        task = asyncio.create_task(capture_camera(camera))
+        CAMERA_DOWNLOADS[camera_id] = camera, task
+    else:
+        active_camera, task = active
+        if active_camera != camera:
+            return Response(status_code=409, headers=headers)
+    data = await asyncio.shield(task)
+    if camera not in CONFIG["cameras"]:
+        return Response(status_code=409, headers=headers)
+    if data is None:
+        return Response(status_code=502, headers=headers)
+    return Response(data, media_type="image/jpeg", headers=headers)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -386,12 +575,17 @@ app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 @app.get("/")
 async def root():
-    return FileResponse(frontend_dir / ("index.html" if CONFIG["setups"] else "setup.html"), headers={"Cache-Control": "no-cache"})
+    if CONFIG["setups"] or CONFIG["cameras"]:
+        return FileResponse(frontend_dir / "index.html", headers={"Cache-Control": "no-cache"})
+    return await setup_page()
 
 
 @app.get("/setup")
 async def setup_page():
-    return FileResponse(frontend_dir / "setup.html", headers={"Cache-Control": "no-cache"})
+    script_version = hashlib.sha256((frontend_dir / "setup.js").read_bytes()).hexdigest()[:16]
+    html = (frontend_dir / "setup.html").read_text(encoding="utf-8")
+    html = html.replace('src="/static/setup.js"', f'src="/static/setup.js?v={script_version}"', 1)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 if __name__ == "__main__":
