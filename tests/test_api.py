@@ -197,6 +197,8 @@ def camera_store(monkeypatch):
     credentials = {}
     monkeypatch.setattr(app.camera_credentials, "read", credentials.get)
     monkeypatch.setattr(app.camera_credentials, "write", lambda key, user, password: credentials.update({key: (user, password)}))
+    monkeypatch.setattr(app.camera_credentials, "read_url", credentials.get)
+    monkeypatch.setattr(app.camera_credentials, "write_url", lambda key, url: credentials.update({key: url}))
     monkeypatch.setattr(app.camera_credentials, "delete", lambda key: credentials.pop(key, None))
     return credentials
 
@@ -305,6 +307,66 @@ async def test_camera_configuration_keeps_credentials_private_and_rotates_atomic
 
 
 @pytest.mark.asyncio
+async def test_protected_camera_url_is_write_only_and_can_be_rotated(isolated_app, camera_store, monkeypatch):
+    transport = httpx.ASGITransport(app=app.app)
+    headers = {"X-Periconet-Action": "camera-setup"}
+    endpoint = "/api/setup/cameras"
+    url = "http://camera/snapshot?cmd=Snap&user=visor&password=initial-test-secret%2B"
+    replacement_url = "http://camera/snapshot?token=replacement-test-secret"
+    async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8000") as client:
+        revision = (await client.get(endpoint, headers=headers)).json()["revision"]
+
+        async def save(camera):
+            return await client.post(endpoint, headers=headers, json={"revision": revision, "cameras": [camera]})
+
+        draft = {"name": "Monturas", "url": url}
+        incompatible = await save(draft)
+        assert incompatible.status_code == 422 and "initial-test-secret" not in incompatible.text
+        mixed = await save(dict(draft, protected_url=True, username="visor", password="separate-test-secret"))
+        assert mixed.status_code == 422 and "separate-test-secret" not in mixed.text
+        assert (await save({"name": "Monturas", "protected_url": True})).status_code == 422
+        assert not camera_store and not app.CONFIG_PATH.exists()
+
+        created = await save(dict(draft, protected_url=True))
+        assert created.status_code == 200 and "initial-test-secret" not in created.text
+        revision = created.json()["revision"]
+        camera = created.json()["cameras"][0]
+        assert camera["protected_url"] and camera["has_credentials"] and camera["url"] is None
+        assert (await client.get(endpoint, headers=headers)).json()["cameras"] == [camera]
+        public = (await client.get("/api/config")).json()["cameras"]
+        assert public == [{"id": camera["id"], "name": "Monturas", "refresh_seconds": 10}]
+        original_id = app.CONFIG["cameras"][0]["credential_id"]
+        assert camera_store == {original_id: url}
+        config = json.loads(app.CONFIG_PATH.read_bytes())
+        assert cameras.StoredCamera.model_validate(config["cameras"][0]).url is None
+        assert "initial-test-secret" not in app.CONFIG_PATH.read_text(encoding="utf-8")
+
+        edit = {"id": camera["id"], "name": "Techo", "url": "", "protected_url": True}
+        retained = await save(edit)
+        assert retained.status_code == 200 and camera_store == {original_id: url}
+        revision = retained.json()["revision"]
+
+        def fail_save(*args):
+            raise OSError("disk error")
+
+        with monkeypatch.context() as failed_write:
+            failed_write.setattr(app.os, "replace", fail_save)
+            failed = await save(dict(edit, url=replacement_url))
+            assert failed.status_code == 500 and "replacement-test-secret" not in failed.text
+        assert camera_store == {original_id: url}
+        rotated = await save(dict(edit, url=replacement_url))
+        assert rotated.status_code == 200
+        assert original_id not in camera_store and list(camera_store.values()) == [replacement_url]
+        assert "replacement-test-secret" not in app.CONFIG_PATH.read_text(encoding="utf-8")
+
+        revision = rotated.json()["revision"]
+        public_url = "http://camera/snapshot?width=640"
+        unprotected = await save(dict(edit, url=public_url, protected_url=False))
+        assert unprotected.status_code == 200 and not camera_store
+        assert unprotected.json()["cameras"][0]["url"] == public_url
+
+
+@pytest.mark.asyncio
 async def test_camera_snapshot_shares_one_download_and_is_independent_of_other_cameras(isolated_app, monkeypatch):
     first = {"id": "1" * 32, "name": "Lenta", "url": "http://camera-one/snapshot", "credential_id": None}
     second = {"id": "2" * 32, "name": "Disponible", "url": "http://camera-two/snapshot", "credential_id": None}
@@ -369,3 +431,35 @@ async def test_camera_download_responds_to_auth_challenge_and_requires_a_jpeg(ca
         assert 'username="visor"' in calls[1] and "clave-prueba" not in calls[1]
     response_bytes = b"<html>Inicio de sesion</html>"
     assert await cameras.download_snapshot(camera) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("url", "protected", "expected_userinfo"), [
+    ("http://camera/snapshot?width=640", False, False),
+    ("http://camera/snapshot?cmd=Snap&user=demo&password=x%2By+z&channel=0", True, False),
+    ("http://demo:test-secret@camera/snapshot", True, True),
+])
+async def test_camera_download_uses_direct_url_without_separate_http_auth(
+    camera_store, monkeypatch, url, protected, expected_userinfo,
+):
+    reference = "1" * 32 if protected else None
+    if protected:
+        camera_store[reference] = url
+    requests = []
+
+    def camera_api(request):
+        requests.append(request)
+        return httpx.Response(200, content=b"\xff\xd8\xfftest")
+
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(camera_api)
+    monkeypatch.setattr(cameras.httpx, "AsyncClient", lambda **kwargs: client(transport=transport, **kwargs))
+    camera = {"url": None if protected else url, "credential_id": reference}
+    assert await cameras.download_snapshot(camera) == b"\xff\xd8\xfftest"
+    assert len(requests) == 1
+    assert requests[0].url.raw_path == httpx.URL(url).raw_path
+    authorization = requests[0].headers.get("Authorization")
+    if expected_userinfo:
+        assert b64decode(authorization.split(" ", 1)[1]) == b"demo:test-secret"
+    else:
+        assert authorization is None

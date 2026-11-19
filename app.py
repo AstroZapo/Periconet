@@ -304,15 +304,21 @@ def camera_admin_settings():
     cameras = []
     for camera in CONFIG["cameras"]:
         credential_id = camera["credential_id"]
+        protected_url = camera["url"] is None
         has_credentials = False
         if credential_id:
             try:
-                has_credentials = camera_credentials.read(credential_id) is not None
+                read_secret = camera_credentials.read_url if protected_url else camera_credentials.read
+                has_credentials = read_secret(credential_id) is not None
             except (OSError, ValueError):
                 pass
         cameras.append(
             {key: camera[key] for key in ("id", "name", "url", "refresh_seconds")}
-            | {"has_credentials": has_credentials, "credentials_missing": bool(credential_id and not has_credentials)}
+            | {
+                "protected_url": protected_url,
+                "has_credentials": has_credentials,
+                "credentials_missing": bool(credential_id and not has_credentials),
+            }
         )
     return {"cameras": cameras, "revision": fingerprint(CONFIG["cameras"])}
 
@@ -364,8 +370,11 @@ def persist_camera_config(config, payload):
     written = []
     config["cameras"] = cameras
     try:
-        for credential_id, (username, password) in pending.items():
-            camera_credentials.write(credential_id, username, password)
+        for credential_id, secret in pending.items():
+            if isinstance(secret, str):
+                camera_credentials.write_url(credential_id, secret)
+            else:
+                camera_credentials.write(credential_id, *secret)
             written.append(credential_id)
         save_config(config)
     except (OSError, ValueError):

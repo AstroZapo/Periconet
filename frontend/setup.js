@@ -121,25 +121,49 @@ function addCamera(values = {}) {
   const card = cameraTemplate.content.firstElementChild.cloneNode(true);
   card.dataset.cameraId = values.id || "";
   const name = card.querySelector(".camera-name");
+  const url = card.querySelector(".camera-url");
+  const urlPlaceholder = url.placeholder;
+  const protectedUrl = card.querySelector(".camera-protected-url");
+  const credentialFields = card.querySelector(".camera-options");
   const username = card.querySelector(".camera-user");
   const password = card.querySelector(".camera-password");
   const credentialStatus = card.querySelector(".camera-credential-status");
   const removalLabel = card.querySelector(".camera-credential-remove");
   const removeCredentials = removalLabel.querySelector("input");
+  const savedSeparateCredentials = !values.protected_url && (values.has_credentials || values.credentials_missing);
   name.value = values.name || "";
-  card.querySelector(".camera-url").value = values.url || "";
+  url.value = values.url || "";
+  protectedUrl.checked = Boolean(values.protected_url);
   card.querySelector(".camera-interval").value = values.refresh_seconds ?? 10;
-  if (values.has_credentials) {
-    credentialStatus.hidden = false;
-    credentialStatus.textContent = "Credenciales guardadas en Windows. Deja los campos vacíos para conservarlas.";
-  } else if (values.credentials_missing) {
-    credentialStatus.hidden = false;
-    credentialStatus.textContent = "Las credenciales no están disponibles en esta cuenta. Vuelve a introducirlas.";
+
+  function updateCameraAccess() {
+    const isProtected = protectedUrl.checked;
+    if (!isProtected && url.type === "password") url.value = values.url || "";
+    url.type = isProtected ? "password" : "url";
+    url.autocomplete = isProtected ? "new-password" : "off";
+    url.required = !isProtected || !values.protected_url;
+    url.placeholder = isProtected ? "URL de captura completa" : urlPlaceholder;
+    credentialFields.hidden = isProtected;
+    removalLabel.hidden = isProtected || !savedSeparateCredentials;
+    username.disabled = password.disabled = isProtected || removeCredentials.checked;
+
+    let message = "";
+    if (isProtected && values.protected_url) {
+      message = values.credentials_missing
+        ? "La URL protegida no está disponible en esta cuenta. Vuelve a introducirla."
+        : "URL protegida guardada en Windows. Deja el campo vacío para conservarla.";
+    } else if (!isProtected && savedSeparateCredentials) {
+      message = values.credentials_missing
+        ? "Las credenciales no están disponibles en esta cuenta. Vuelve a introducirlas."
+        : "Credenciales guardadas en Windows. Deja los campos vacíos para conservarlas.";
+    }
+    credentialStatus.textContent = message;
+    credentialStatus.hidden = !message;
   }
-  removalLabel.hidden = !(values.has_credentials || values.credentials_missing);
-  removeCredentials.addEventListener("change", () => {
-    username.disabled = password.disabled = removeCredentials.checked;
-  });
+
+  protectedUrl.addEventListener("change", updateCameraAccess);
+  removeCredentials.addEventListener("change", updateCameraAccess);
+  updateCameraAccess();
   card.querySelector("button.remove").addEventListener("click", () => {
     card.remove();
     cameraSettingsDirty = true;
@@ -157,14 +181,17 @@ function displayCameraSettings(settings) {
 
 function collectCameraSettings() {
   const cameras = [...cameraEntries.children].map(card => {
-    const removeCredentials = card.querySelector(".camera-credential-remove input").checked;
+    const protectedUrl = card.querySelector(".camera-protected-url").checked;
+    const removeCredentials = !protectedUrl && card.querySelector(".camera-credential-remove input").checked;
+    const useSeparateCredentials = !protectedUrl && !removeCredentials;
     return {
       id: card.dataset.cameraId || null,
       name: card.querySelector(".camera-name").value.trim(),
       url: card.querySelector(".camera-url").value.trim(),
       refresh_seconds: Number(card.querySelector(".camera-interval").value),
-      username: removeCredentials ? "" : card.querySelector(".camera-user").value.trim(),
-      password: removeCredentials ? "" : card.querySelector(".camera-password").value,
+      username: useSeparateCredentials ? card.querySelector(".camera-user").value.trim() : "",
+      password: useSeparateCredentials ? card.querySelector(".camera-password").value : "",
+      protected_url: protectedUrl,
       remove_credentials: removeCredentials
     };
   });

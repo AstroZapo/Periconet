@@ -22,24 +22,33 @@ SECRET_QUERY_FIELDS = {
     "auth", "authorization", "apikey", "api_key", "key", "secret", "session", "sessionid", "signature",
 }
 MAX_SNAPSHOT_BYTES = 12 * 1024 * 1024
+MAX_CAMERA_URL_LENGTH = 2048
+
+
+def require_url_without_credentials(value):
+    url = httpx.URL(value)
+    if url.userinfo or any(key.casefold() in SECRET_QUERY_FIELDS for key in url.params):
+        raise ValueError("Marca «La URL contiene credenciales» o introdúcelas en sus propios campos.")
 
 
 class CameraSettings(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-    url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2048)]
+    url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_CAMERA_URL_LENGTH)] | None = Field(
+        default=None, repr=False,
+    )
     refresh_seconds: int = Field(default=10, ge=10, le=86400)
 
     @field_validator("url")
     @classmethod
     def snapshot_url(cls, value):
+        if not value:
+            return None
         try:
             url = httpx.URL(value)
         except (httpx.InvalidURL, ValueError):
             raise ValueError("Introduce una URL HTTP o HTTPS válida") from None
         if url.scheme not in ("http", "https") or not url.host or url.fragment:
             raise ValueError("Introduce una URL HTTP o HTTPS sin fragmento")
-        if url.userinfo or any(key.casefold() in SECRET_QUERY_FIELDS for key in url.params):
-            raise ValueError("Introduce las credenciales en sus propios campos, fuera de la URL")
         return str(url)
 
 
@@ -47,12 +56,34 @@ class StoredCamera(CameraSettings):
     id: CameraId
     credential_id: CameraId | None = None
 
+    @model_validator(mode="after")
+    def stored_access(self):
+        if self.url is not None:
+            require_url_without_credentials(self.url)
+        elif not self.credential_id:
+            raise ValueError("La cámara necesita una URL de captura o una referencia a su URL protegida.")
+        return self
+
 
 class CameraInput(CameraSettings):
     id: CameraId | None = None
     username: Annotated[str, StringConstraints(strip_whitespace=True, max_length=128)] = ""
     password: SecretStr = Field(default=SecretStr(""), max_length=256)
     remove_credentials: bool = False
+    protected_url: bool = False
+
+    @model_validator(mode="after")
+    def validate_access(self):
+        if self.protected_url:
+            if self.username or self.password.get_secret_value():
+                raise ValueError("Deja vacíos Usuario y Contraseña al usar una URL protegida.")
+            if self.url and len(self.url.encode("utf-8")) > MAX_CAMERA_URL_LENGTH:
+                raise ValueError("La URL protegida supera el tamaño permitido.")
+        elif self.url:
+            require_url_without_credentials(self.url)
+        else:
+            raise ValueError("Introduce la URL de captura de la cámara.")
+        return self
 
 
 def check_unique(cameras):
@@ -79,34 +110,47 @@ def url_origin(value):
     return url.scheme, url.host, url.port
 
 
+def camera_access(item, previous):
+    was_protected = previous is not None and previous["url"] is None
+    if item.protected_url:
+        if item.url:
+            return None, uuid.uuid4().hex, item.url
+        if was_protected:
+            return None, previous["credential_id"], None
+        raise ValueError(f"{item.name}: introduce la URL protegida de la cámara.")
+
+    credential_id = previous["credential_id"] if previous and not was_protected else None
+    username = item.username
+    password = item.password.get_secret_value()
+    if item.remove_credentials:
+        if username or password:
+            raise ValueError(f"{item.name}: elige entre sustituir o eliminar las credenciales.")
+        credential_id = None
+    elif password or username:
+        if password and not username and credential_id:
+            saved = camera_credentials.read(credential_id)
+            username = saved[0] if saved else ""
+        if not (username and password):
+            raise ValueError(f"{item.name}: introduce el usuario y la contraseña de la cámara.")
+        return item.url, uuid.uuid4().hex, (username, password)
+    elif credential_id and url_origin(item.url) != url_origin(previous["url"]):
+        raise ValueError(f"{item.name}: introduce las credenciales para la nueva dirección.")
+    return item.url, credential_id, None
+
+
 def prepare_cameras(inputs, existing):
     cameras = []
     pending_credentials = {}
     for item in inputs:
         if item.id and item.id not in existing:
             raise ValueError("La cámara ya no existe. Recarga la configuración.")
-        previous = existing.get(item.id)
-        credential_id = previous["credential_id"] if previous else None
-        username = item.username
-        password = item.password.get_secret_value()
-        if item.remove_credentials:
-            if username or password:
-                raise ValueError(f"{item.name}: elige entre sustituir o eliminar las credenciales.")
-            credential_id = None
-        elif password or username:
-            if password and not username and credential_id:
-                saved = camera_credentials.read(credential_id)
-                username = saved[0] if saved else ""
-            if not (username and password):
-                raise ValueError(f"{item.name}: introduce el usuario y la contraseña de la cámara.")
-            credential_id = uuid.uuid4().hex
-            pending_credentials[credential_id] = (username, password)
-        elif credential_id and url_origin(item.url) != url_origin(previous["url"]):
-            raise ValueError(f"{item.name}: introduce las credenciales para la nueva dirección.")
+        url, credential_id, new_secret = camera_access(item, existing.get(item.id))
+        if new_secret is not None:
+            pending_credentials[credential_id] = new_secret
         cameras.append({
             "id": item.id or uuid.uuid4().hex,
             "name": item.name,
-            "url": item.url,
+            "url": url,
             "refresh_seconds": item.refresh_seconds,
             "credential_id": credential_id,
         })
@@ -135,15 +179,21 @@ class CameraAuth(httpx.Auth):
 async def download_snapshot(camera):
     try:
         async with asyncio.timeout(8):
+            url = camera["url"]
+            credential_id = camera["credential_id"]
             auth = None
-            if camera["credential_id"]:
-                credentials = camera_credentials.read(camera["credential_id"])
+            if url is None:
+                url = camera_credentials.read_url(credential_id)
+                if url is None:
+                    return None
+            elif credential_id:
+                credentials = camera_credentials.read(credential_id)
                 if credentials is None:
                     return None
                 auth = CameraAuth(*credentials)
             async with (
                 httpx.AsyncClient(timeout=8, trust_env=False) as client,
-                client.stream("GET", camera["url"], auth=auth) as response,
+                client.stream("GET", url, auth=auth) as response,
             ):
                 response.raise_for_status()
                 data = bytearray()
@@ -154,5 +204,5 @@ async def download_snapshot(camera):
                 if not data.startswith(b"\xff\xd8\xff"):
                     return None
                 return bytes(data)
-    except (OSError, httpx.HTTPError, ValueError, KeyError):
+    except (OSError, httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError):
         return None

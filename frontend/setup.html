@@ -62,13 +62,14 @@
   button.add:disabled { opacity: 0.6; cursor: default; }
   #status { margin-top: 16px; font-family: var(--mono); font-size: 0.85rem; color: var(--ok); display: none; }
   #camera-settings fieldset { min-width: 0; border: 0; padding: 0; margin: 0; }
+  #camera-settings [hidden] { display: none; }
   #camera-settings .camera-help { font-size: 0.8rem; color: var(--text-dim); }
   #camera-settings .camera-status.error { color: #ffaaaa; }
   #camera-settings .camera-card > label:first-of-type { margin-right: 24px; }
   #camera-settings .row label { margin-top: 0; }
   #camera-settings .camera-card label input { display: block; margin-top: 4px; }
   #camera-settings .camera-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  #camera-settings .camera-card .camera-credential-remove input { display: inline; width: auto; margin-right: 4px; }
+  #camera-settings .camera-card .camera-check input { display: inline; width: auto; margin-right: 4px; }
   @media (max-width: 480px) {
     #camera-settings .row { grid-template-columns: 1fr; }
   }
@@ -124,22 +125,23 @@
         </label>
         <div class="row">
           <label>URL de captura JPEG
-            <input class="camera-url" type="url" required maxlength="2048" placeholder="http://…/ISAPI/Streaming/channels/1/picture">
+            <input class="camera-url" type="url" required maxlength="2048" autocomplete="off" placeholder="http://…/ISAPI/Streaming/channels/1/picture">
           </label>
           <label>Refresco (s)
             <input class="camera-interval" type="number" required min="10" max="86400" step="1" value="10">
           </label>
         </div>
+        <label class="camera-check"><input class="camera-protected-url" type="checkbox"> La URL contiene credenciales</label>
         <div class="row camera-options">
-          <label>Usuario
+          <label>Usuario (opcional)
             <input class="camera-user" maxlength="128" autocomplete="off">
           </label>
-          <label>Contraseña
+          <label>Contraseña (opcional)
             <input class="camera-password" type="password" maxlength="256" autocomplete="new-password">
           </label>
         </div>
         <p class="camera-help camera-credential-status" hidden></p>
-        <label class="camera-credential-remove" hidden><input type="checkbox"> Quitar credenciales guardadas</label>
+        <label class="camera-credential-remove camera-check" hidden><input type="checkbox"> Quitar credenciales guardadas</label>
       </div>
     </template>
   </section>

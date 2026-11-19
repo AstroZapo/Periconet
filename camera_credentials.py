@@ -45,7 +45,7 @@ def credential_api():
     return api
 
 
-def read(credential_id):
+def _read(credential_id):
     api = credential_api()
     entry = ctypes.POINTER(Credential)()
     if not api.CredReadW(f"Periconet/camera/{credential_id}", CRED_TYPE_GENERIC, 0, ctypes.byref(entry)):
@@ -55,16 +55,13 @@ def read(credential_id):
         raise ctypes.WinError(error)
     try:
         value = entry.contents
-        fields = json.loads(ctypes.string_at(value.CredentialBlob, value.CredentialBlobSize))
-        if not isinstance(fields, list) or len(fields) != 2 or not all(isinstance(field, str) for field in fields):
-            raise ValueError("Entrada de credenciales de cámara inválida")
-        return tuple(fields)
+        return json.loads(ctypes.string_at(value.CredentialBlob, value.CredentialBlobSize))
     finally:
         api.CredFree(entry)
 
 
-def write(credential_id, username, password):
-    data = json.dumps((username, password), ensure_ascii=False).encode("utf-8")
+def _write(credential_id, value):
+    data = json.dumps(value, ensure_ascii=False).encode("utf-8")
     blob = (ctypes.c_ubyte * len(data)).from_buffer_copy(data)
     entry = Credential(
         Type=CRED_TYPE_GENERIC,
@@ -75,6 +72,32 @@ def write(credential_id, username, password):
     )
     if not credential_api().CredWriteW(ctypes.byref(entry), 0):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def read(credential_id):
+    fields = _read(credential_id)
+    if fields is None:
+        return None
+    if not isinstance(fields, list) or len(fields) != 2 or not all(isinstance(field, str) for field in fields):
+        raise ValueError("Entrada de credenciales de cámara inválida")
+    return tuple(fields)
+
+
+def write(credential_id, username, password):
+    _write(credential_id, (username, password))
+
+
+def read_url(credential_id):
+    fields = _read(credential_id)
+    if fields is None:
+        return None
+    if not isinstance(fields, dict) or not isinstance(fields.get("url"), str) or not fields["url"]:
+        raise ValueError("Entrada de URL protegida inválida")
+    return fields["url"]
+
+
+def write_url(credential_id, url):
+    _write(credential_id, {"url": url})
 
 
 def delete(credential_id):
