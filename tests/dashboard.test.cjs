@@ -106,6 +106,67 @@ test('cada captura se actualiza y una descarga antigua no reaparece tras cambiar
   assert.equal(b.elements.get('image-cell-one').children[0].src, '/new-target');
 });
 
+test('la cámara y la all-sky mantienen la imagen anterior hasta decodificar la siguiente', async () => {
+  const b = browser();
+  const decoding = [];
+  b.context.Image.prototype.decode = function () {
+    return new Promise((resolve, reject) => decoding.push({image: this, resolve, reject}));
+  };
+  const camera = b.run('cameraTile({id:"one", name:"Techo", refresh_seconds:10})');
+  camera.setActive(true);
+  const allSky = b.run('buildExtraCard({title:"All-sky", refresh_seconds:10}, 0)');
+  b.run('updateImage("one", "/first", "1")');
+  const frames = [camera.tile.children[0], allSky.children[1], b.elements.get('image-cell-one')];
+  assert.ok(decoding.every(({image}) => image.src));
+  decoding.slice(0, 3).forEach(load => load.resolve());
+  await Promise.resolve();
+  assert.deepEqual(frames.map(frame => frame.querySelector('img')), b.images.slice(0, 3));
+
+  const refresh = () => [...b.intervals.values()].filter(timer => timer.delay === 10000)
+    .forEach(timer => timer.callback());
+  refresh();
+  refresh();
+  b.run('updateImage("one", "/second", "2")');
+  assert.equal(decoding.length, 6);
+  assert.deepEqual(frames.map(frame => frame.querySelector('img')), b.images.slice(0, 3));
+
+  decoding[3].resolve();
+  decoding[4].reject(new Error('Imagen no decodificable'));
+  decoding[5].resolve();
+  await Promise.resolve();
+  assert.deepEqual(frames.map(frame => frame.querySelector('img')), [b.images[3], b.images[1], b.images[5]]);
+  assert.equal(allSky.children[0].children[1].textContent, 'sin conexión');
+});
+
+test('la barra avanza entre sondeos aunque NINA solo indique la hora de fin', () => {
+  const b = browser();
+  let now = Date.parse('2026-11-20T01:00:00Z');
+  b.context.Date = class extends Date { static now() { return now; } };
+  const tick = [...b.intervals.values()].find(timer => timer.delay === 200).callback;
+  const update = exp => b.run(`updateExposureState("one", ${JSON.stringify(exp)})`);
+  const exposure = {is_exposing: true, end_time: '2026-11-20T01:01:00Z', observed_at_ms: now, duration: 0};
+  update(exposure);
+  const bar = b.elements.get('exposure-bar-one');
+  const timer = b.elements.get('exposure-timer-one');
+  assert.equal(bar.style.width, '0.0%');
+
+  now += 30_000;
+  tick();
+  assert.equal(bar.style.width, '50.0%');
+  assert.equal(timer.textContent, '30s restantes');
+  update(exposure);
+  assert.equal(bar.style.width, '50.0%');
+
+  now += 31_000;
+  tick();
+  assert.equal(bar.style.width, '100.0%');
+  update({camera_state: 'Downloading'});
+  assert.equal(bar.className, 'exposure-bar-fill downloading');
+  update({...exposure, end_time: '2026-11-20T01:01:41Z', observed_at_ms: now});
+  assert.equal(bar.style.width, '0.0%');
+  assert.equal(bar.className, 'exposure-bar-fill');
+});
+
 test('visor HD sigue la captura actual e ignora respuestas tardías', () => {
   const b = browser();
   b.run('updateImage("one", "/first", "1"); openImageModal("one")');

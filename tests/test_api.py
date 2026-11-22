@@ -152,12 +152,11 @@ async def test_hires_download_race_does_not_publish_previous_target(isolated_app
     client = AsyncMock()
     item = {"Filename": "old.fits"}
     client.get_history_item.return_value = item
-    client.get_sequence.return_value = []
     record = {"token": "old", "bytes": b"old", "hires": None, "index": 0, "item": item,
               "client": client, "lock": asyncio.Lock()}
     app.IMAGES["one"] = record
     worker = AsyncMock()
-    worker.scheduler = None
+    worker.refresh_target.return_value = True
     app.WORKERS["one"] = worker
     async def download(*args, **kwargs):
         app.IMAGES.pop("one")

@@ -1,6 +1,7 @@
 """Interpretación del estado de NINA y selección conservadora de capturas."""
 import hashlib
 import json
+import time
 from astronomy import number
 
 
@@ -56,12 +57,12 @@ def target_from_data(data, path=""):
             "epoch": coords.get("Epoch"), "filter_summary": {}}
 
 
-def active_target(sequence, scheduler=None):
+def active_target(sequence, *, matching_name=None, key_path=None):
     """Solo ramas en ejecución. Ante objetivos simultáneos ambiguos, no inferir."""
     candidates = []
-    running = False
+    expected_name = normalize(matching_name)
+
     def visit(node, path):
-        nonlocal running
         if isinstance(node, list):
             for index, child in enumerate(node):
                 visit(child, f"{path}/{index}")
@@ -69,17 +70,14 @@ def active_target(sequence, scheduler=None):
             status = str(node.get("Status", "")).upper()
             if status and status != "RUNNING":
                 return
-            running |= status == "RUNNING"
             if status == "RUNNING":
-                target = target_from_data(node.get("Target"), path)
-                if target:
+                target = target_from_data(node.get("Target"), key_path or path)
+                if target and (not expected_name or normalize(target["name"]) == expected_name):
                     candidates.append(target)
             visit(node.get("Items", []), path + "/Items")
     visit(sequence, "sequence")
     if len(candidates) == 1:
         return candidates[0]
-    if not candidates and running and scheduler:
-        return target_from_data(scheduler, "scheduler")
     return None
 
 
@@ -133,12 +131,18 @@ class CaptureTracker:
         return summary
 
 
-def exposure_state(camera):
+def exposure_state(camera, previous=None):
     camera = camera or {}
     connected = camera.get("Connected", False)
     state = camera.get("CameraState", "Desconocido") if connected else "Desconectado"
     exposing = connected and bool(camera.get("IsExposing") or state == "Exposing")
-    # Advanced API no garantiza la duración de la exposición actual.
-    # Nunca se infiere a partir de la toma anterior ni del tiempo restante.
+    end_time = camera.get("ExposureEndTime") if exposing else None
+    observed_at_ms = None
+    if end_time:
+        if previous and previous.get("end_time") == end_time:
+            observed_at_ms = previous.get("observed_at_ms")
+        if observed_at_ms is None:
+            # La API facilita la hora de fin. Conservamos el primer sondeo de esta toma.
+            observed_at_ms = time.time_ns() // 1_000_000
     return {"is_exposing": exposing, "camera_state": state,
-            "end_time": camera.get("ExposureEndTime") if exposing else None, "duration": 0}
+            "end_time": end_time, "observed_at_ms": observed_at_ms, "duration": 0}

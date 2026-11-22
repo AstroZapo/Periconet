@@ -405,6 +405,18 @@ function updateConnectionDot(setupId, connected) {
   dot.className = "dot " + (connected ? "connected" : "disconnected");
 }
 
+function loadDecodedImage(url, onImage, onError) {
+  const image = new Image();
+  if (typeof image.decode === "function") {
+    image.src = url;
+    image.decode().then(() => onImage(image), onError);
+  } else {
+    image.onload = () => onImage(image);
+    image.onerror = onError;
+    image.src = url;
+  }
+}
+
 function updateImage(setupId, url, imageId) {
   const cell = document.getElementById(`image-cell-${setupId}`);
   if (!cell) return;
@@ -420,18 +432,15 @@ function updateImage(setupId, url, imageId) {
   }
   if (cell.dataset.loadedKey === key || cell.dataset.requestedKey === key) return;
   cell.dataset.requestedKey = key;
-  const probe = new Image();
-  probe.alt = "Última captura del objetivo actual";
-  probe.onload = () => {
+  loadDecodedImage(url, image => {
     if (IMAGE_STATES[setupId]?.id !== key || cell.dataset.requestedKey !== key) return;
-    cell.replaceChildren(probe, el("span", "image-zoom-badge", "🔍 Zoom HD"));
+    image.alt = "Última captura del objetivo actual";
+    cell.replaceChildren(image, el("span", "image-zoom-badge", "🔍 Zoom HD"));
     cell.dataset.loadedKey = key;
     cell.dataset.requestedKey = "";
-  };
-  probe.onerror = () => {
+  }, () => {
     if (cell.dataset.requestedKey === key) cell.dataset.requestedKey = "";
-  };
-  probe.src = url;
+  });
   if (currentModalSetupId === setupId && old?.id !== key) openImageModal(setupId, true);
 }
 
@@ -439,15 +448,12 @@ const EXPOSURE_TRACKING = {};
 
 function updateExposureState(setupId, exp) {
   if (!exp) return;
-  let endTimeMs = null;
-  if (exp.end_time) {
-    const t = new Date(exp.end_time).getTime();
-    if (!isNaN(t)) endTimeMs = t;
-  }
+  const endTimeMs = Date.parse(exp.end_time);
   EXPOSURE_TRACKING[setupId] = {
     isExposing: !!exp.is_exposing,
     cameraState: exp.camera_state || "Desconectado",
-    endTimeMs: endTimeMs,
+    endTimeMs: Number.isFinite(endTimeMs) ? endTimeMs : null,
+    observedAtMs: exp.observed_at_ms,
     duration: exp.duration || 0,
   };
   renderExposureTick(setupId);
@@ -470,22 +476,23 @@ function renderExposureTick(setupId) {
     timerEl.textContent = "Lectura del sensor";
     barEl.style.width = "100%";
     barEl.className = "exposure-bar-fill downloading";
-  } else if (exp.isExposing && exp.endTimeMs && exp.duration > 0) {
-    const remainingSec = Math.max(0, (exp.endTimeMs - now) / 1000);
-    const elapsedSec = Math.max(0, exp.duration - remainingSec);
-    const pct = Math.min(100, Math.max(0, (elapsedSec / exp.duration) * 100));
+  } else if (exp.isExposing) {
+    const hasEndTime = exp.endTimeMs !== null;
+    const remainingSec = hasEndTime ? Math.max(0, (exp.endTimeMs - now) / 1000) : 0;
+    const observedDuration = hasEndTime && Number.isFinite(exp.observedAtMs)
+      ? (exp.endTimeMs - exp.observedAtMs) / 1000 : 0;
+    const progressDuration = exp.duration > 0 ? exp.duration : observedDuration;
+    const elapsedSec = Math.max(0, progressDuration - remainingSec);
+    const pct = hasEndTime && progressDuration > 0 ? Math.min(100, elapsedSec / progressDuration * 100) : 0;
 
     statusEl.textContent = "Exponiendo";
     statusEl.className = "exposure-status exposing";
-    timerEl.textContent = `${Math.floor(elapsedSec)}s / ${Math.floor(exp.duration)}s (${Math.round(pct)}%)`;
+    if (hasEndTime && exp.duration > 0) {
+      timerEl.textContent = `${Math.floor(elapsedSec)}s / ${Math.floor(exp.duration)}s (${Math.round(pct)}%)`;
+    } else {
+      timerEl.textContent = hasEndTime ? `${Math.ceil(remainingSec)}s restantes` : "—";
+    }
     barEl.style.width = `${pct.toFixed(1)}%`;
-    barEl.className = "exposure-bar-fill";
-  } else if (exp.isExposing && exp.endTimeMs) {
-    const remainingSec = Math.max(0, (exp.endTimeMs - now) / 1000);
-    statusEl.textContent = "Exponiendo";
-    statusEl.className = "exposure-status exposing";
-    timerEl.textContent = `${Math.ceil(remainingSec)}s restantes`;
-    barEl.style.width = "0%";
     barEl.className = "exposure-bar-fill";
   } else {
     statusEl.textContent = exp.cameraState === "Idle" ? "En reposo" : (exp.cameraState || "En espera");
@@ -1050,16 +1057,13 @@ function pollImage(url, seconds, onImage, onError) {
   const refresh = () => {
     if (pending) return;
     pending = true;
-    const probe = new Image();
-    probe.onload = () => {
+    loadDecodedImage(`${url}?t=${Date.now()}`, image => {
       pending = false;
-      if (timer !== null) onImage(probe);
-    };
-    probe.onerror = () => {
+      if (timer !== null) onImage(image);
+    }, () => {
       pending = false;
       if (timer !== null) onError();
-    };
-    probe.src = `${url}?t=${Date.now()}`;
+    });
   };
   return active => {
     if (active === (timer !== null)) return;

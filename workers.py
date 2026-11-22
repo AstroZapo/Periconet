@@ -13,6 +13,10 @@ from monitoring import CaptureTracker, active_target, exposure_state, fingerprin
 
 logger = logging.getLogger("periconet")
 
+SCHEDULER_TARGET_EVENTS = {"TS-NEWTARGETSTART", "TS-TARGETSTART"}
+SEQUENCE_BOUNDARY_EVENTS = {"SEQUENCE-STARTING", "SEQUENCE-FINISHED"}
+TARGET_BOUNDARY_EVENTS = SEQUENCE_BOUNDARY_EVENTS | {"TS-WAITSTART"}
+
 
 def empty_target():
     return {"name": "Sin objetivo identificado", "key": None, "ra": None, "dec": None,
@@ -70,16 +74,18 @@ class NinaWorker:
             previous = self.state.get("target", {})
             if previous.get("key") == target.get("key"):
                 target["filter_summary"] = previous.get("filter_summary", {})
-        if self.tracker.set_target(target):
+        changed = self.tracker.set_target(target)
+        self.state["target"] = target or empty_target()
+        if changed:
             self.clear_image()
             self.state["hfr_history"] = []
-            self.state["target"] = target or empty_target()
             await self.publish()
-        self.state["target"] = target or empty_target()
 
-    async def reset(self):
+    async def reset(self, *, restarted=False):
+        self.sequence_status_version += 1
         self.tracker = CaptureTracker()
-        self.scheduler = None
+        if restarted:
+            self.scheduler = None
         self.clear_image()
         self.state.update(connected=False, camera=None, mount=None, weather=None, safety=None,
                           site=None, night=None, sequence_running=False,
@@ -93,16 +99,36 @@ class NinaWorker:
             self.state["sequence_running"] = False
             await self.publish()
 
+    async def update_target_from_sequence(self, sequence, version):
+        if version != self.sequence_status_version:
+            return False
+        # El objetivo del planificador llega por eventos y puede faltar en /sequence/state.
+        if self.scheduler is None and not isinstance(sequence, list):
+            return False
+        if self.scheduler is not None and self.scheduler["ra"] is None:
+            # El historial puede conservar el nombre y perder las coordenadas anidadas.
+            target = active_target(sequence, matching_name=self.scheduler["name"], key_path="scheduler")
+            if target is not None and target["ra"] is not None:
+                self.scheduler = {**target, "name": self.scheduler["name"]}
+        await self.set_target(self.scheduler or active_target(sequence))
+        return version == self.sequence_status_version
+
+    async def refresh_target(self):
+        version = self.sequence_status_version
+        sequence = await self.optional("secuencia", self.client.get_sequence())
+        return await self.update_target_from_sequence(sequence, version)
+
     async def poll(self):
         camera = await self.client.get_camera_info()
         if not isinstance(camera, dict):
             raise ValueError("Información de cámara no válida")
         start = await self.optional("inicio de NINA", self.client._get("/application-start"))
         if start and self.start_time and start != self.start_time:
-            await self.reset()
+            await self.reset(restarted=True)
+            await self.restore_target_events()
         if start:
             self.start_time = start
-        self.state.update(connected=True, camera=camera, exposure=exposure_state(camera))
+        self.state.update(connected=True, camera=camera, exposure=exposure_state(camera, self.state["exposure"]))
         if self.state["site"] is None:
             profile = await self.optional("ubicación", self.client.get_profile())
             site = site_from_profile(profile)
@@ -122,7 +148,7 @@ class NinaWorker:
                 isinstance(block, dict) and str(block.get("Status", "")).casefold() == "running"
                 for block in sequence
             )
-        await self.set_target(active_target(sequence, self.scheduler))
+        await self.update_target_from_sequence(sequence, sequence_status_version)
         history = await self.optional("historial", self.read_history())
         if history is not None:
             if self.tracker.update_history(history):
@@ -163,9 +189,8 @@ class NinaWorker:
             return
         # El objetivo puede haber cambiado durante la descarga. Verificar antes
         # de publicar, también si no hay WebSocket disponible.
-        sequence = await self.client.get_sequence()
-        target = active_target(sequence, self.scheduler)
-        await self.set_target(target)
+        if not await self.refresh_target():
+            return
         if generation != self.tracker.generation or not self.tracker.matching(item):
             return
         if await self.client.get_history_item(index) != item:
@@ -179,15 +204,35 @@ class NinaWorker:
 
     async def handle_event(self, event):
         name = event.get("Event")
-        if name in ("TS-NEWTARGETSTART", "TS-TARGETSTART"):
-            self.scheduler = event
-            await self.set_target(target_from_data(event, "scheduler"))
-        elif name in ("SEQUENCE-FINISHED", "SEQUENCE-STARTING"):
+        if name in SCHEDULER_TARGET_EVENTS:
+            target = target_from_data(event, "scheduler")
+            if target is None:
+                return
+            self.sequence_status_version += 1
+            self.scheduler = target
+            await self.set_target(target)
+        elif name in TARGET_BOUNDARY_EVENTS:
             self.scheduler = None
-            await self.invalidate_sequence_status()
+            if name in SEQUENCE_BOUNDARY_EVENTS:
+                await self.invalidate_sequence_status()
+            else:
+                self.sequence_status_version += 1
             await self.set_target(None)
-        if name in ("IMAGE-SAVE", "TS-NEWTARGETSTART", "TS-TARGETSTART"):
+        if name == "IMAGE-SAVE" or name in SCHEDULER_TARGET_EVENTS | TARGET_BOUNDARY_EVENTS:
             self.wake.set()
+
+    async def restore_target_events(self):
+        version = self.sequence_status_version
+        history = await self.optional("eventos anteriores", self.client._get("/event-history"))
+        if version != self.sequence_status_version or not isinstance(history, list):
+            return
+        for event in reversed(history):
+            if not isinstance(event, dict):
+                continue
+            name = event.get("Event")
+            if name in TARGET_BOUNDARY_EVENTS or (name in SCHEDULER_TARGET_EVENTS and target_from_data(event)):
+                await self.handle_event(event)
+                break
 
     async def events(self):
         url = urlsplit(self.client.base_url)
@@ -198,20 +243,13 @@ class NinaWorker:
                     self.report("eventos NINA")
                     # Recuperar el contexto de Target Scheduler al abrir el panel
                     # durante una secuencia ya iniciada.
-                    history = await self.optional("eventos anteriores", self.client._get("/event-history"))
-                    if isinstance(history, list):
-                        for event in reversed(history):
-                            if event.get("Event") in ("TS-NEWTARGETSTART", "TS-TARGETSTART", "SEQUENCE-FINISHED", "SEQUENCE-STARTING"):
-                                self.scheduler = event if event["Event"].startswith("TS-") else None
-                                break
+                    await self.restore_target_events()
                     async for raw in ws:
                         event = json.loads(raw).get("Response")
                         if isinstance(event, dict):
                             await self.handle_event(event)
             except Exception as exc:
                 self.report("eventos NINA", exc)
-                self.scheduler = None
-                self.wake.set()
             await asyncio.sleep(5)
 
     async def run(self):

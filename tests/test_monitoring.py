@@ -31,9 +31,7 @@ def test_active_target_not_last_image_or_container_label():
     assert target["name"] == "M31" and target["ra"] == 1
     assert active_target(sequence(status="FINISHED")) is None
     assert active_target(sequence() + sequence("M42")) is None
-    scheduler = {"TargetName": "M42", "Coordinates": {"RA": 5, "Dec": -5}}
-    assert active_target([{"Status": "RUNNING"}], scheduler)["name"] == "M42"
-    assert active_target([], scheduler) is None
+    assert active_target([{"Status": "RUNNING"}]) is None
 
 
 @pytest.mark.parametrize(("degrees", "negative", "expected_dec"), [
@@ -88,10 +86,21 @@ def test_same_name_new_coordinates_is_a_new_target():
     assert tracker.latest() is None
 
 
-def test_exposure_never_invents_duration():
-    exp = exposure_state({"Connected": True, "IsExposing": True, "ExposureEndTime": "2026-11-15T23:00:00Z"})
+def test_exposure_keeps_the_first_observation_until_the_next_capture(monkeypatch):
+    clock = iter((1_000_000_000, 9_000_000_000))
+    monkeypatch.setattr("monitoring.time.time_ns", lambda: next(clock))
+    camera = {"Connected": True, "IsExposing": True, "ExposureEndTime": "2026-11-15T23:00:00Z"}
+    exp = exposure_state(camera)
     assert exp["duration"] == 0 and exp["is_exposing"]
-    assert exposure_state({"Connected": False, "IsExposing": True})["is_exposing"] is False
+    assert exp["observed_at_ms"] == 1000
+    assert exposure_state(camera, exp) == exp
+
+    camera["ExposureEndTime"] = "2026-11-15T23:02:00Z"
+    newer = exposure_state(camera, exp)
+    assert newer["observed_at_ms"] == 9000
+    assert exposure_state({"Connected": True, "IsExposing": True}, newer)["observed_at_ms"] is None
+    idle = exposure_state({**camera, "Connected": False}, newer)
+    assert idle["is_exposing"] is False and idle["observed_at_ms"] is None
 
 
 def test_solar_geometry_and_polar_nights():
@@ -109,9 +118,12 @@ def test_solar_geometry_and_polar_nights():
 
 
 class FakeNina:
+    base_url = "http://localhost:1888/v2/api"
+
     def __init__(self):
         self.target = sequence()
         self.history = []
+        self.event_history = []
         self.profile_calls = 0
         self.downloads = []
         self.start = "session-1"
@@ -122,7 +134,7 @@ class FakeNina:
             raise OSError("sin conexión")
         return {"Connected": True, "IsExposing": True, "CameraState": "Exposing"}
     async def _get(self, path):
-        return self.start
+        return self.event_history if path == "/event-history" else self.start
     async def get_profile(self):
         self.profile_calls += 1
         return {"AstrometrySettings": {"Latitude": 40, "Longitude": -3}}
@@ -155,6 +167,94 @@ async def worker():
     await worker.client.close()
     worker.client = FakeNina()
     return worker
+
+
+async def test_scheduler_target_and_image_survive_incomplete_sequence_polls(worker):
+    worker.client.target = []
+    await worker.poll()
+    await worker.handle_event({"Event": "TS-NEWTARGETSTART", "TargetName": "Sh2 174",
+                               "Coordinates": {"RA": 23.7803, "Dec": 80.9389}})
+    target_key = worker.state["target"]["key"]
+    worker.client.history.append(capture("Sh2 174"))
+    await worker.poll()
+    image_id = worker.state["latest_image_id"]
+    assert image_id and worker.state["target"]["ra"] == 23.7803
+
+    worker.client.get_sequence = AsyncMock(side_effect=OSError("sin estado de secuencia"))
+    await worker.poll()
+    assert worker.state["target"]["key"] == target_key
+    assert worker.state["latest_image_id"] == image_id
+
+    worker.client.history.append(capture("Sh2 174", index=2))
+    await worker.poll()
+    assert worker.state["latest_image_id"] != image_id
+    assert worker.images["one"]["index"] == 1
+    assert worker.state["target"]["filter_summary"]["L"]["count"] == 2
+
+    # La espera recibida durante un sondeo invalida su respuesta anterior.
+    async def stale_poll():
+        await worker.handle_event({"Event": "TS-WAITSTART"})
+        return sequence()
+
+    worker.client.get_sequence = stale_poll
+    await worker.poll()
+    assert worker.state["target"]["key"] is None
+    assert worker.state["latest_image_id"] is None and not worker.images
+
+
+async def test_scheduler_recovers_altitude_coordinates_before_a_new_capture(worker):
+    name = "IC 5146 HOS"
+    ra = 21 + 48 / 60 + 6 / 3600
+    start = {"Event": "TS-TARGETSTART", "TargetName": name, "Coordinates": {"RA": [], "Dec": []}}
+    worker.client.event_history = [start, {"Event": "IMAGE-SAVE"}]
+    worker.client.history = [capture(name)]
+    worker.client.target = sequence("Otro objetivo") + sequence(name, ra=ra, status="FINISHED")
+    await worker.restore_target_events()
+    await worker.poll()
+    assert worker.state["target"]["name"] == name and worker.state["target"]["ra"] is None
+
+    worker.client.target = sequence("Otro objetivo") + sequence(name.lower(), ra=ra)
+    await worker.poll()
+    target = worker.state["target"]
+    assert target["name"] == name and (target["ra"], target["dec"]) == (ra, 40)
+    assert worker.state["site"] and worker.state["night"]
+    assert worker.state["latest_image_id"] is None and worker.client.downloads == []
+
+    worker.client.target = []
+    await worker.poll()
+    assert worker.state["target"]["key"] == target["key"]
+    await worker.handle_event({**start, "Coordinates": {"RA": ra, "Dec": 40}})
+    assert worker.state["target"]["key"] == target["key"]
+
+
+async def test_scheduler_context_survives_socket_failure_and_replays_boundaries(worker, monkeypatch):
+    worker.client.target = []
+    start = {"Event": "TS-TARGETSTART", "TargetName": "Sh2 174"}
+    worker.client.event_history = [start, {"Event": "IMAGE-SAVE"}]
+    await worker.restore_target_events()
+
+    disconnected = asyncio.Event()
+
+    def fail_socket(*args, **kwargs):
+        disconnected.set()
+        raise OSError("sin WebSocket")
+
+    monkeypatch.setattr("workers.websockets.connect", fail_socket)
+    listener = asyncio.create_task(worker.events())
+    try:
+        await asyncio.wait_for(disconnected.wait(), 1)
+        await worker.poll()
+        assert worker.state["target"]["name"] == "Sh2 174"
+    finally:
+        listener.cancel()
+        await asyncio.gather(listener, return_exceptions=True)
+
+    for event in ("TS-WAITSTART", "SEQUENCE-FINISHED", "SEQUENCE-STARTING"):
+        worker.client.event_history = [start, {"Event": event}, {"Event": "IMAGE-SAVE"}]
+        await worker.restore_target_events()
+        await worker.poll()
+        assert worker.state["target"]["key"] is None
+        await worker.handle_event(start)
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,7 @@ from cameras import (
     prepare_cameras,
 )
 from clients.nina_client import NinaError
-from monitoring import active_target, fingerprint
+from monitoring import fingerprint
 from workers import NinaWorker, build_state, phd2_loop
 
 logging.basicConfig(level=logging.INFO)
@@ -480,8 +480,8 @@ async def get_latest_hires_image(setup_id: str, request: Request):
                 if await client.get_history_item(record["index"]) != record["item"]:
                     return Response(status_code=409)
                 data = await client.get_image_bytes(record["index"], quality=65, resize=False)
-                sequence = await client.get_sequence()
-                await worker.set_target(active_target(sequence, worker.scheduler))
+                if not await worker.refresh_target():
+                    return Response(status_code=409)
                 if IMAGES.get(setup_id) is not record or await client.get_history_item(record["index"]) != record["item"]:
                     return Response(status_code=409)
                 if not data:
