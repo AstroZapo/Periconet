@@ -255,9 +255,11 @@ function renderHfrList(setupId, history) {
   const list = document.getElementById(`hfr-list-${setupId}`);
   if (!list) return;
   list.innerHTML = "";
-  (history || []).forEach((h, i) => {
+  const entries = history || [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const h = entries[i];
     const hfr = h.HFR ?? h.Hfr ?? h.hfr;
-    if (!Number.isFinite(hfr)) return;
+    if (!Number.isFinite(hfr)) continue;
     const target = typeof h.TargetName === "string" ? h.TargetName.trim() : "";
     const date = typeof h.Date === "string" ? new Date(h.Date) : null;
     const row = el("div", "hfr-row");
@@ -272,7 +274,7 @@ function renderHfrList(setupId, history) {
     row.appendChild(label);
     row.appendChild(el("span", "val", hfr.toFixed(2)));
     list.appendChild(row);
-  });
+  }
 }
 
 function rms(values) {
