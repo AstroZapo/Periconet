@@ -55,6 +55,7 @@ test('el botón de fin de secuencia pide confirmación y muestra la respuesta de
   assert.equal(button.disabled, true);
   b.run('applyFullState("one", {connected:true});');
   assert.equal(button.disabled, true);
+  assert.match(button.title, /sin confirmar/);
   b.run('applyFullState("one", {sequence_running:true});');
   assert.equal(button.disabled, false);
   b.context.window.confirm = () => false;
@@ -222,6 +223,13 @@ test('la gráfica dibuja la curva roja y muestra hora y altura de culminación e
   const localNoon = new Date("2000-01-01T12:00:00Z").toLocaleTimeString("es-ES", {hour: "2-digit", minute: "2-digit"});
   assert.ok(strokes.includes('#f43f5e'));
   assert.ok(labels.some(({label, x}) => label === `Culm. ${localNoon} · 44.5°` && Math.abs(x - 132.5) < 1));
+
+  strokes.length = 0;
+  b.run(`renderTargetInfo("one", {ra: ${280.46061837 / 15}, dec: -5.5,
+    ra_string: "18.6974 h", dec_string: "-5.5°", coordinates_source: "mount"});`);
+  assert.equal(b.elements.get('target-ra-one').textContent, '≈18.6974 h');
+  assert.match(b.elements.get('target-coords-one').title, /montura/);
+  assert.ok(strokes.includes('#f43f5e'));
 });
 
 test('las cámaras seleccionadas forman el mosaico y un fallo conserva el nombre y la última imagen', () => {

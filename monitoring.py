@@ -1,7 +1,9 @@
 """Interpretación del estado de NINA y selección conservadora de capturas."""
+import datetime as dt
 import hashlib
 import json
 import time
+
 from astronomy import number
 
 
@@ -55,6 +57,34 @@ def target_from_data(data, path=""):
             "ra": ra, "dec": dec, "ra_string": coords.get("RAString") or (f"{ra:.4f} h" if ra is not None else ""),
             "dec_string": coords.get("DecString") or (f"{dec:.4f}°" if dec is not None else ""),
             "epoch": coords.get("Epoch"), "filter_summary": {}}
+
+
+def mount_coordinates_for_capture(mount, captured_at):
+    """Aproxima el centro de una captura reciente con el apuntado de la montura."""
+    if (not isinstance(mount, dict) or mount.get("Connected") is not True
+            or mount.get("TrackingEnabled") is not True or mount.get("Slewing") is not False
+            or mount.get("AtPark") is True or mount.get("AtHome") is True):
+        return None
+    if not isinstance(captured_at, str):
+        return None
+    if captured_at.endswith("Z"):
+        captured_at = captured_at[:-1] + "+00:00"
+    try:
+        captured = dt.datetime.fromisoformat(captured_at)
+    except ValueError:
+        return None
+    if captured.utcoffset() is None or abs((dt.datetime.now(dt.timezone.utc) - captured).total_seconds()) > 20:
+        return None
+
+    for coordinates in (mount.get("Coordinates"), {
+        "RA": mount.get("RightAscension"), "Dec": mount.get("Declination"),
+        "RAString": mount.get("RightAscensionString"), "DecString": mount.get("DeclinationString"),
+        "Epoch": mount.get("EquatorialSystem"),
+    }):
+        _, ra, _ = target_coordinates({"Coordinates": coordinates})
+        if ra is not None:
+            return coordinates
+    return None
 
 
 def active_target(sequence, *, matching_name=None, key_path=None):

@@ -39,7 +39,10 @@ function updateSequenceEndButton(setupId, button) {
   const state = STATES[setupId];
   const running = state?.connected === true && state.sequence_running === true;
   button.disabled = !running || button.dataset.sending === "true";
-  button.title = running ? "Saltar al bloque final de la secuencia" : "Requiere una secuencia avanzada en curso";
+  if (running) button.title = "Saltar al bloque final de la secuencia";
+  else if (!state?.connected) button.title = "NINA sin conexión";
+  else if (state.sequence_running == null) button.title = "Estado de la secuencia avanzada sin confirmar";
+  else button.title = "Requiere una secuencia avanzada en curso";
 }
 
 async function skipSequenceToEnd(setup, button, status) {
@@ -771,17 +774,21 @@ function renderTargetInfo(setupId, target) {
   LAST_TARGET_DATA[setupId] = target;
 
   const nameEl = document.getElementById(`target-name-${setupId}`);
+  const coordsEl = document.getElementById(`target-coords-${setupId}`);
   const raEl = document.getElementById(`target-ra-${setupId}`);
   const decEl = document.getElementById(`target-dec-${setupId}`);
   const altEl = document.getElementById(`target-alt-${setupId}`);
   const azEl = document.getElementById(`target-az-${setupId}`);
   const filtersEl = document.getElementById(`target-filters-${setupId}`);
 
+  const fromMount = target.coordinates_source === "mount";
+  const prefix = fromMount ? "≈" : "";
   if (nameEl) nameEl.textContent = target.name || "—";
-  if (raEl) raEl.textContent = target.ra_string || "—";
-  if (decEl) decEl.textContent = target.dec_string || "—";
-  if (altEl) altEl.textContent = target.altitude != null ? `${Number(target.altitude).toFixed(1)}°` : "—";
-  if (azEl) azEl.textContent = target.azimuth != null ? `${Number(target.azimuth).toFixed(1)}°` : "—";
+  if (coordsEl) coordsEl.title = fromMount ? "Estimación a partir del apuntado de la montura al guardar la captura" : "";
+  if (raEl) raEl.textContent = target.ra_string ? `${prefix}${target.ra_string}` : "—";
+  if (decEl) decEl.textContent = target.dec_string ? `${prefix}${target.dec_string}` : "—";
+  if (altEl) altEl.textContent = target.altitude != null ? `${prefix}${Number(target.altitude).toFixed(1)}°` : "—";
+  if (azEl) azEl.textContent = target.azimuth != null ? `${prefix}${Number(target.azimuth).toFixed(1)}°` : "—";
 
   if (filtersEl && target.filter_summary) {
     const pills = Object.entries(target.filter_summary).map(([filter, info]) => {
@@ -1216,7 +1223,7 @@ let ws = null;
 function markDisconnected() {
   for (const setup of SETUPS) {
     const id = setup.id;
-    applyFullState(id, {connected:false, sequence_running:false, camera:null, mount:null, weather:null, safety:null,
+    applyFullState(id, {connected:false, sequence_running:null, camera:null, mount:null, weather:null, safety:null,
       target:{name:"Sin conexión", key:null}, latest_image_id:null, latest_image_url:null,
       exposure:{camera_state:"Desconectado", is_exposing:false}, guiding_status:"desconectado"});
   }

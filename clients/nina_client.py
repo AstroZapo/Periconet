@@ -1,7 +1,13 @@
 """Cliente para Advanced API v2 de N.I.N.A."""
+import logging
 import math
+from itertools import count
+from time import perf_counter
 
 import httpx
+
+logger = logging.getLogger("periconet.nina")
+request_ids = count(1)
 
 
 class NinaError(Exception):
@@ -27,8 +33,26 @@ class NinaClient:
     async def close(self):
         await self.http.aclose()
 
+    async def _request(self, path, params=None, headers=None):
+        url = self.base_url + path
+        if not logger.isEnabledFor(logging.DEBUG):
+            return await self.http.get(url, params=params, headers=headers)
+        request_id = next(request_ids)
+        started = perf_counter()
+        logger.debug("NINA HTTP #%d GET %s parámetros=%s", request_id, url, params)
+        try:
+            response = await self.http.get(url, params=params, headers=headers)
+        except Exception as exc:
+            logger.debug("NINA HTTP #%d GET %s falló en %.1f ms (%s: %s)", request_id, url,
+                         (perf_counter() - started) * 1000, type(exc).__name__, str(exc) or "sin mensaje")
+            raise
+        logger.debug("NINA HTTP #%d GET %s respondió HTTP %d en %.1f ms (%d bytes, %s)", request_id, url,
+                     response.status_code, (perf_counter() - started) * 1000,
+                     len(response.content), response.headers.get("content-type", "sin Content-Type"))
+        return response
+
     async def _get(self, path, params=None):
-        response = await self.http.get(self.base_url + path, params=params)
+        response = await self._request(path, params)
         return self._read_json(response)
 
     @staticmethod
@@ -60,12 +84,15 @@ class NinaClient:
     async def get_profile(self):
         return await self._get("/profile/show", {"active": "true"})
 
-    async def get_sequence(self):
-        return await self._get("/sequence/state")
+    async def get_advanced_sequence(self):
+        return await self._get("/sequence/json")
+
+    async def get_event_history(self):
+        return await self._get("/event-history")
 
     async def skip_sequence_to_end(self):
-        response = await self.http.get(
-            self.base_url + "/sequence/skip",
+        response = await self._request(
+            "/sequence/skip",
             params={"type": "ToEnd"},
             headers={"Cache-Control": "no-cache, no-store"},
         )
@@ -93,7 +120,7 @@ class NinaClient:
         return int(await self.get_history(count="true") or 0)
 
     async def get_image_bytes(self, index, quality=80, resize=True):
-        response = await self.http.get(f"{self.base_url}/image/{index}", params={
+        response = await self._request(f"/image/{index}", params={
             "quality": quality, "resize": "true" if resize else "false", "stream": "true"})
         if response.headers.get("content-type", "").startswith("image/"):
             response.raise_for_status()

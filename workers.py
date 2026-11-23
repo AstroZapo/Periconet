@@ -2,6 +2,7 @@
 import asyncio
 import json
 import logging
+from time import perf_counter
 from urllib.parse import urlsplit
 
 import websockets
@@ -9,13 +10,22 @@ import websockets
 from astronomy import night_at_connection, number, site_from_profile
 from clients.nina_client import NinaClient
 from clients.phd2_client import PHD2Client
-from monitoring import CaptureTracker, active_target, exposure_state, fingerprint, target_from_data
+from monitoring import (
+    CaptureTracker,
+    active_target,
+    exposure_state,
+    fingerprint,
+    mount_coordinates_for_capture,
+    normalize,
+    target_from_data,
+)
 
 logger = logging.getLogger("periconet")
 
 SCHEDULER_TARGET_EVENTS = {"TS-NEWTARGETSTART", "TS-TARGETSTART"}
-SEQUENCE_BOUNDARY_EVENTS = {"SEQUENCE-STARTING", "SEQUENCE-FINISHED"}
-TARGET_BOUNDARY_EVENTS = SEQUENCE_BOUNDARY_EVENTS | {"TS-WAITSTART"}
+SCHEDULER_EVENTS = SCHEDULER_TARGET_EVENTS | {"TS-WAITSTART"}
+SEQUENCE_EVENTS = SCHEDULER_EVENTS | {"SEQUENCE-STARTING", "SEQUENCE-FINISHED"}
+SEQUENCE_CHECK_INTERVAL = 30
 
 
 def empty_target():
@@ -25,7 +35,7 @@ def empty_target():
 
 def build_state(setup):
     return {"name": setup["name"], "connected": False, "camera": None, "mount": None,
-            "weather": None, "safety": None, "site": None, "night": None, "sequence_running": False,
+            "weather": None, "safety": None, "site": None, "night": None, "sequence_running": None,
             "hfr_history": [], "target": empty_target(), "exposure": exposure_state(None),
             "latest_image_id": None, "latest_image_url": None,
             "guide_steps": [], "guide_seq": 0, "guiding_status": "desconectado", "pixel_scale": None}
@@ -39,15 +49,22 @@ class NinaWorker:
         self.sequence_status_version = 0
         self.tracker = CaptureTracker()
         self.wake = asyncio.Event()
-        self.scheduler = None
+        self.sequence_wake = asyncio.Event()
+        self.sequence_event = None
+        self.socket_connected = False
+        self.event_history_pending = True
+        self.last_history_event = None
         self.start_time = None
         self.failures = set()
 
     def report(self, name, error=None):
-        if error and name not in self.failures:
-            logger.warning("%s: %s no disponible: %s", self.setup["name"], name, error)
-            self.failures.add(name)
-        elif not error and name in self.failures:
+        if error is not None:
+            logger.debug("%s: fallo en %s", self.setup["name"], name, exc_info=error)
+            if name not in self.failures:
+                logger.warning("%s: %s no disponible: %s: %s", self.setup["name"], name,
+                               type(error).__name__, str(error) or "sin mensaje")
+                self.failures.add(name)
+        elif name in self.failures:
             logger.info("%s: %s recuperado", self.setup["name"], name)
             self.failures.remove(name)
 
@@ -69,7 +86,7 @@ class NinaWorker:
         self.images.pop(self.setup["id"], None)
         self.state.update(latest_image_id=None, latest_image_url=None)
 
-    async def set_target(self, target):
+    def set_target(self, target):
         if target:
             previous = self.state.get("target", {})
             if previous.get("key") == target.get("key"):
@@ -79,44 +96,64 @@ class NinaWorker:
         if changed:
             self.clear_image()
             self.state["hfr_history"] = []
-            await self.publish()
+        return changed
 
     async def reset(self, *, restarted=False):
         self.sequence_status_version += 1
         self.tracker = CaptureTracker()
         if restarted:
-            self.scheduler = None
+            self.sequence_event = None
+        self.event_history_pending = True
+        self.last_history_event = None
         self.clear_image()
         self.state.update(connected=False, camera=None, mount=None, weather=None, safety=None,
-                          site=None, night=None, sequence_running=False,
+                          site=None, night=None, sequence_running=None,
                           hfr_history=[], target=empty_target(), exposure=exposure_state(None))
         await self.publish()
 
     async def invalidate_sequence_status(self):
-        self.sequence_status_version += 1
-        self.wake.set()
-        if self.state["sequence_running"]:
-            self.state["sequence_running"] = False
+        await self.handle_event({"Event": "SEQUENCE-FINISHED"})
+
+    async def refresh_advanced_sequence(self):
+        # SEQUENCE-STARTING también lo emite el secuenciador simple.
+        if self.sequence_event in SCHEDULER_EVENTS:
+            return
+        version = self.sequence_status_version
+        sequence = await self.optional("secuencia avanzada", self.client.get_advanced_sequence())
+        if version != self.sequence_status_version:
+            return
+        running = None
+        if isinstance(sequence, list):
+            running = any(isinstance(block, dict) and str(block.get("Status", "")).casefold() == "running"
+                          for block in sequence)
+        changed = running != self.state["sequence_running"]
+        self.state["sequence_running"] = running
+        target = active_target(sequence) if running else None
+        explicit_target = self.tracker.target and not self.tracker.target.get("from_capture")
+        if target or (running is True and explicit_target) or (
+            running is False and self.sequence_event != "SEQUENCE-STARTING"
+        ):
+            changed = self.set_target(target) or changed
+        if changed:
             await self.publish()
 
-    async def update_target_from_sequence(self, sequence, version):
-        if version != self.sequence_status_version:
-            return False
-        # El objetivo del planificador llega por eventos y puede faltar en /sequence/state.
-        if self.scheduler is None and not isinstance(sequence, list):
-            return False
-        if self.scheduler is not None and self.scheduler["ra"] is None:
-            # El historial puede conservar el nombre y perder las coordenadas anidadas.
-            target = active_target(sequence, matching_name=self.scheduler["name"], key_path="scheduler")
-            if target is not None and target["ra"] is not None:
-                self.scheduler = {**target, "name": self.scheduler["name"]}
-        await self.set_target(self.scheduler or active_target(sequence))
-        return version == self.sequence_status_version
-
-    async def refresh_target(self):
-        version = self.sequence_status_version
-        sequence = await self.optional("secuencia", self.client.get_sequence())
-        return await self.update_target_from_sequence(sequence, version)
+    async def sequence_updates(self):
+        while True:
+            try:
+                await asyncio.wait_for(self.sequence_wake.wait(), SEQUENCE_CHECK_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+            self.sequence_wake.clear()
+            if not self.state["connected"]:
+                continue
+            if self.event_history_pending or not self.socket_connected:
+                self.event_history_pending = False
+                if not await self.restore_target_events():
+                    self.event_history_pending = True
+            idle = self.state["sequence_running"] is False and self.sequence_event in (None, "SEQUENCE-FINISHED")
+            if idle and (self.socket_connected or self.sequence_event == "SEQUENCE-FINISHED"):
+                continue
+            await self.refresh_advanced_sequence()
 
     async def poll(self):
         camera = await self.client.get_camera_info()
@@ -125,34 +162,33 @@ class NinaWorker:
         start = await self.optional("inicio de NINA", self.client._get("/application-start"))
         if start and self.start_time and start != self.start_time:
             await self.reset(restarted=True)
-            await self.restore_target_events()
         if start:
             self.start_time = start
+        reconnected = not self.state["connected"]
         self.state.update(connected=True, camera=camera, exposure=exposure_state(camera, self.state["exposure"]))
+        if reconnected:
+            self.sequence_wake.set()
         if self.state["site"] is None:
             profile = await self.optional("ubicación", self.client.get_profile())
             site = site_from_profile(profile)
             if site:
                 self.state["site"] = site
                 self.state["night"] = night_at_connection(site)
-        sequence_status_version = self.sequence_status_version
-        sequence, mount, weather, safety = await asyncio.gather(
-            self.optional("secuencia", self.client.get_sequence()),
+        mount, weather, safety = await asyncio.gather(
             self.optional("montura", self.client.get_mount_info()),
             self.optional("meteorología", self.client.get_weather_info()),
             self.optional("seguridad", self.client.get_safety_info()))
         self.state.update(mount=mount, weather=weather, safety=safety)
-        if sequence_status_version == self.sequence_status_version:
-            # /sequence/state devuelve los bloques de la secuencia avanzada y sus estados.
-            self.state["sequence_running"] = isinstance(sequence, list) and any(
-                isinstance(block, dict) and str(block.get("Status", "")).casefold() == "running"
-                for block in sequence
-            )
-        await self.update_target_from_sequence(sequence, sequence_status_version)
+        sequence_version = self.sequence_status_version
+        previous_count = len(self.tracker.history)
+        had_history = self.tracker.initialized
         history = await self.optional("historial", self.read_history())
         if history is not None:
-            if self.tracker.update_history(history):
+            reset = self.tracker.update_history(history)
+            if reset:
                 self.clear_image()
+            if had_history and not reset and sequence_version == self.sequence_status_version:
+                self.update_target_from_captures(history, previous_count)
             self.state["target"]["filter_summary"] = self.tracker.summary()
             limit = max(1, int(self.config.get("hfr_history_points", 60)))
             self.state["hfr_history"] = [item for item in history if self.tracker.matching(item)][-limit:]
@@ -160,6 +196,42 @@ class NinaWorker:
             if candidate:
                 await self.optional("imagen", self.load_image(*candidate))
         await self.publish()
+
+    def update_target_from_captures(self, history, first_index):
+        if self.sequence_event in SCHEDULER_EVENTS or (
+            self.sequence_event != "SEQUENCE-STARTING" and self.state["sequence_running"] is not True
+        ):
+            return
+        if self.tracker.target and not self.tracker.target.get("from_capture"):
+            return
+        for index in range(len(history) - 1, first_index - 1, -1):
+            item = history[index]
+            if str(item.get("ImageType", "")).upper() != "LIGHT":
+                continue
+            target = target_from_data(item, "capture")
+            if not target:
+                continue
+            previous = self.tracker.target
+            same_target = previous and normalize(target["name"]) == normalize(previous["name"])
+            if same_target and previous["ra"] is not None and (
+                previous.get("coordinates_source") != "mount" or target["ra"] is None
+            ):
+                return
+            if target["ra"] is None:
+                coords = mount_coordinates_for_capture(self.state["mount"], item.get("Date"))
+                if coords is not None:
+                    target = target_from_data({**item, "Coordinates": coords}, "capture")
+                    target["coordinates_source"] = "mount"
+                    logger.debug("%s: coordenadas aproximadas de montura para %s", self.setup["name"], target["name"])
+            target["from_capture"] = True
+            if same_target:
+                if target["ra"] is not None:
+                    target["key"] = previous["key"]
+                    self.set_target(target)
+            else:
+                self.set_target(target)
+                self.tracker.floor = index
+            return
 
     async def read_history(self):
         count = await self.client.get_image_count()
@@ -181,82 +253,121 @@ class NinaWorker:
 
     async def load_image(self, index, item):
         generation = self.tracker.generation
+        if not self.image_target_is_current(generation, item):
+            return
         token = fingerprint([self.start_time, generation, index, item])
         if self.state["latest_image_id"] == token:
             return
         data = await self.client.get_image_bytes(index)
         if not data:
             return
-        # El objetivo puede haber cambiado durante la descarga. Verificar antes
-        # de publicar, también si no hay WebSocket disponible.
-        if not await self.refresh_target():
-            return
-        if generation != self.tracker.generation or not self.tracker.matching(item):
+        if not self.image_target_is_current(generation, item):
             return
         if await self.client.get_history_item(index) != item:
             return
-        if generation != self.tracker.generation or not self.tracker.matching(item):
+        if not self.image_target_is_current(generation, item):
             return
-        self.images[self.setup["id"]] = {"token": token, "index": index, "item": item,
+        self.images[self.setup["id"]] = {"token": token, "index": index, "item": item, "generation": generation,
                                           "bytes": data, "hires": None, "client": self.client,
                                           "lock": asyncio.Lock()}
         self.state.update(latest_image_id=token, latest_image_url=f"/api/image/{self.setup['id']}?v={token}")
 
-    async def handle_event(self, event):
+    def image_target_is_current(self, generation, item):
+        running = self.state["sequence_running"] is True or (
+            self.sequence_event == "SEQUENCE-STARTING" and self.socket_connected
+        )
+        return (self.state["connected"] and running and generation == self.tracker.generation
+                and self.tracker.matching(item))
+
+    async def handle_event(self, event, *, replay=False):
         name = event.get("Event")
-        if name in SCHEDULER_TARGET_EVENTS:
-            target = target_from_data(event, "scheduler")
-            if target is None:
-                return
-            self.sequence_status_version += 1
-            self.scheduler = target
-            await self.set_target(target)
-        elif name in TARGET_BOUNDARY_EVENTS:
-            self.scheduler = None
-            if name in SEQUENCE_BOUNDARY_EVENTS:
-                await self.invalidate_sequence_status()
-            else:
-                self.sequence_status_version += 1
-            await self.set_target(None)
-        if name == "IMAGE-SAVE" or name in SCHEDULER_TARGET_EVENTS | TARGET_BOUNDARY_EVENTS:
+        if not isinstance(name, str) or (name not in SEQUENCE_EVENTS and name != "IMAGE-SAVE"):
+            return
+        logger.debug("%s: evento NINA %s", self.setup["name"], name)
+        if name == "IMAGE-SAVE":
             self.wake.set()
+            return
+
+        self.sequence_status_version += 1
+        self.sequence_event = name
+        running = None if name == "SEQUENCE-STARTING" else name in SCHEDULER_EVENTS
+        changed = self.state["sequence_running"] != running
+        self.state["sequence_running"] = running
+        target = None
+        if name in SCHEDULER_TARGET_EVENTS:
+            project = normalize(event.get("ProjectName"))
+            target = target_from_data(event, f"scheduler/{project}")
+            if target:
+                target["project"] = project
+                previous = self.tracker.target
+                if (target["ra"] is None and previous and previous.get("ra") is not None
+                        and previous.get("project") == project and normalize(previous["name"]) == normalize(target["name"])):
+                    target = previous
+        target_changed = self.set_target(target)
+        if changed or target_changed:
+            self.wake.set()
+            logger.debug("%s: estado de secuencia por eventos (en curso=%s, objetivo=%s)",
+                         self.setup["name"], running, self.state["target"]["name"])
+            await self.publish()
+        if name == "SEQUENCE-STARTING" and not replay:
+            self.sequence_wake.set()
 
     async def restore_target_events(self):
         version = self.sequence_status_version
-        history = await self.optional("eventos anteriores", self.client._get("/event-history"))
-        if version != self.sequence_status_version or not isinstance(history, list):
-            return
+        history = await self.optional("eventos anteriores", self.client.get_event_history())
+        if not isinstance(history, list):
+            return False
+        if version != self.sequence_status_version:
+            return True
         for event in reversed(history):
             if not isinstance(event, dict):
                 continue
             name = event.get("Event")
-            if name in TARGET_BOUNDARY_EVENTS or (name in SCHEDULER_TARGET_EVENTS and target_from_data(event)):
-                await self.handle_event(event)
-                break
+            if not isinstance(name, str) or name not in SEQUENCE_EVENTS:
+                continue
+            if event != self.last_history_event or self.state["sequence_running"] is None:
+                self.last_history_event = event
+                logger.debug("%s: recuperando el último evento de secuencia (%s de %d eventos)",
+                             self.setup["name"], name, len(history))
+                await self.handle_event(event, replay=True)
+            break
+        return True
 
     async def events(self):
         url = urlsplit(self.client.base_url)
+        socket_url = f"ws://{url.netloc}/v2/socket"
         while True:
             try:
-                async with websockets.connect(f"ws://{url.netloc}/v2/socket", open_timeout=5,
+                logger.debug("%s: abriendo WebSocket NINA %s", self.setup["name"], socket_url)
+                async with websockets.connect(socket_url, open_timeout=5,
                                                ping_interval=20, ping_timeout=10) as ws:
+                    self.socket_connected = True
+                    self.event_history_pending = True
+                    self.sequence_wake.set()
+                    logger.debug("%s: WebSocket NINA conectado", self.setup["name"])
                     self.report("eventos NINA")
-                    # Recuperar el contexto de Target Scheduler al abrir el panel
-                    # durante una secuencia ya iniciada.
-                    await self.restore_target_events()
                     async for raw in ws:
                         event = json.loads(raw).get("Response")
                         if isinstance(event, dict):
                             await self.handle_event(event)
+                    logger.debug("%s: WebSocket NINA cerrado", self.setup["name"])
             except Exception as exc:
                 self.report("eventos NINA", exc)
+            if self.socket_connected:
+                self.socket_connected = False
+                self.sequence_status_version += 1
+                self.state["sequence_running"] = None
+                self.sequence_wake.set()
+                await self.publish()
             await asyncio.sleep(5)
 
     async def run(self):
-        listener = asyncio.create_task(self.events())
+        logger.debug("%s: iniciando sondeo de %s", self.setup["name"], self.client.base_url)
+        background = (asyncio.create_task(self.events()), asyncio.create_task(self.sequence_updates()))
         try:
             while True:
                 self.wake.clear()
+                started = perf_counter()
                 try:
                     await self.poll()
                     self.report("NINA")
@@ -264,13 +375,18 @@ class NinaWorker:
                     self.report("NINA", exc)
                     if self.state["connected"]:
                         await self.reset()
+                logger.debug("%s: sondeo terminado en %.1f ms (conectado=%s, sondeo pendiente=%s)",
+                             self.setup["name"], (perf_counter() - started) * 1000,
+                             self.state["connected"], self.wake.is_set())
                 try:
                     await asyncio.wait_for(self.wake.wait(), max(1, self.config.get("poll_interval_seconds", 5)))
+                    logger.debug("%s: siguiente sondeo adelantado por un evento u orden", self.setup["name"])
                 except asyncio.TimeoutError:
                     pass
         finally:
-            listener.cancel()
-            await asyncio.gather(listener, return_exceptions=True)
+            for task in background:
+                task.cancel()
+            await asyncio.gather(*background, return_exceptions=True)
             await self.client.close()
 
 

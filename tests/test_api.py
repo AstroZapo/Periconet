@@ -1,10 +1,11 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from base64 import b64decode
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -20,6 +21,7 @@ from workers import build_state
 def isolated_app(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "CONFIG_PATH", tmp_path / "config.json")
     monkeypatch.setattr(app, "CONFIG", dict(app.DEFAULT_CONFIG))
+    monkeypatch.setattr(app, "SERVER_PORT", app.DEFAULT_CONFIG["port"])
     monkeypatch.setattr(app, "STATE", {})
     monkeypatch.setattr(app, "IMAGES", {})
     monkeypatch.setattr(app, "WORKERS", {})
@@ -103,6 +105,28 @@ async def test_sequence_to_end_reports_failure_when_nina_does_not_confirm(
 
 
 @pytest.mark.asyncio
+async def test_nina_debug_logs_requests_without_response_bodies(caplog):
+    caplog.set_level(logging.DEBUG, logger="periconet.nina")
+
+    def nina_api(request):
+        if request.url.path.endswith("/sequence/json"):
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(200, json={"Response": {"Name": "camera name in response"}})
+
+    nina = NinaClient("nina", 1888)
+    await nina.close()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(nina_api)) as client:
+        nina.http = client
+        await nina.get_camera_info()
+        with pytest.raises(httpx.ReadTimeout):
+            await nina.get_advanced_sequence()
+
+    assert re.search(r"/equipment/camera/info respondió HTTP 200 en [\d.]+ ms \(\d+ bytes", caplog.text)
+    assert re.search(r"/sequence/json falló en [\d.]+ ms \(ReadTimeout: sin mensaje\)", caplog.text)
+    assert "camera name in response" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_config_rename_remove_and_connection_change(isolated_app):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
         result = (await client.post("/api/setup", json=payload())).json()
@@ -116,6 +140,26 @@ async def test_config_rename_remove_and_connection_change(isolated_app):
         await client.post("/api/setup", json={"setups": []})
         assert not app.STATE
         assert json.loads(app.CONFIG_PATH.read_text())["setups"] == []
+
+
+@pytest.mark.asyncio
+async def test_log_level_applies_immediately_and_survives_other_setup_saves(isolated_app, caplog):
+    caplog.set_level(logging.INFO, logger=app.logger.name)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url="http://test") as client:
+        assert (await client.get("/api/config")).json()["log_level"] == "INFO"
+        result = await client.post("/api/setup", json={**payload(), "log_level": "DEBUG"})
+        assert result.status_code == 200 and result.json()["restart_required"] is False
+        assert app.logger.isEnabledFor(logging.DEBUG)
+        assert (await client.get("/api/config")).json()["log_level"] == "DEBUG"
+        setup_id = result.json()["setups"][0]["id"]
+        assert (await client.post("/api/setup", json=payload(id=setup_id))).status_code == 200
+        invalid = await client.post("/api/setup", json={**payload(id=setup_id), "log_level": "TRACE"})
+        assert invalid.status_code == 422
+        assert json.loads(app.CONFIG_PATH.read_text())["log_level"] == "DEBUG"
+        app.stop_setup.assert_not_awaited()
+        result = await client.post("/api/setup", json={**payload(id=setup_id), "log_level": "INFO"})
+        assert result.status_code == 200
+        assert not app.logger.isEnabledFor(logging.DEBUG)
 
 
 @pytest.mark.asyncio
@@ -152,11 +196,11 @@ async def test_hires_download_race_does_not_publish_previous_target(isolated_app
     client = AsyncMock()
     item = {"Filename": "old.fits"}
     client.get_history_item.return_value = item
-    record = {"token": "old", "bytes": b"old", "hires": None, "index": 0, "item": item,
+    record = {"token": "old", "bytes": b"old", "hires": None, "index": 0, "item": item, "generation": 1,
               "client": client, "lock": asyncio.Lock()}
     app.IMAGES["one"] = record
     worker = AsyncMock()
-    worker.refresh_target.return_value = True
+    worker.image_target_is_current = Mock(return_value=True)
     app.WORKERS["one"] = worker
     async def download(*args, **kwargs):
         app.IMAGES.pop("one")

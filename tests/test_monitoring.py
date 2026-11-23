@@ -134,11 +134,14 @@ class FakeNina:
             raise OSError("sin conexión")
         return {"Connected": True, "IsExposing": True, "CameraState": "Exposing"}
     async def _get(self, path):
-        return self.event_history if path == "/event-history" else self.start
+        assert path == "/application-start"
+        return self.start
+    async def get_event_history(self):
+        return self.event_history
     async def get_profile(self):
         self.profile_calls += 1
         return {"AstrometrySettings": {"Latitude": 40, "Longitude": -3}}
-    async def get_sequence(self):
+    async def get_advanced_sequence(self):
         return self.target
     async def get_mount_info(self):
         return {"Connected": True}
@@ -169,18 +172,23 @@ async def worker():
     return worker
 
 
-async def test_scheduler_target_and_image_survive_incomplete_sequence_polls(worker):
+async def test_scheduler_target_and_images_use_events_without_sequence_queries(worker):
     worker.client.target = []
+    worker.client.get_advanced_sequence = AsyncMock(side_effect=OSError("sin estado de secuencia"))
     await worker.poll()
-    await worker.handle_event({"Event": "TS-NEWTARGETSTART", "TargetName": "Sh2 174",
-                               "Coordinates": {"RA": 23.7803, "Dec": 80.9389}})
+    target_event = {"Event": "TS-NEWTARGETSTART", "TargetName": "Sh2 174",
+                    "Coordinates": {"RA": 23.7803, "Dec": 80.9389}}
+    await worker.handle_event(target_event)
+    worker.wake.clear()
+    await worker.handle_event({**target_event, "Event": "TS-TARGETSTART"})
+    assert worker.state["sequence_running"] is True and not worker.wake.is_set()
     target_key = worker.state["target"]["key"]
     worker.client.history.append(capture("Sh2 174"))
     await worker.poll()
     image_id = worker.state["latest_image_id"]
     assert image_id and worker.state["target"]["ra"] == 23.7803
 
-    worker.client.get_sequence = AsyncMock(side_effect=OSError("sin estado de secuencia"))
+    await worker.refresh_advanced_sequence()
     await worker.poll()
     assert worker.state["target"]["key"] == target_key
     assert worker.state["latest_image_id"] == image_id
@@ -191,39 +199,36 @@ async def test_scheduler_target_and_image_survive_incomplete_sequence_polls(work
     assert worker.images["one"]["index"] == 1
     assert worker.state["target"]["filter_summary"]["L"]["count"] == 2
 
-    # La espera recibida durante un sondeo invalida su respuesta anterior.
-    async def stale_poll():
-        await worker.handle_event({"Event": "TS-WAITSTART"})
-        return sequence()
-
-    worker.client.get_sequence = stale_poll
+    await worker.handle_event({"Event": "TS-WAITSTART"})
     await worker.poll()
+    await worker.refresh_advanced_sequence()
+    worker.client.get_advanced_sequence.assert_not_awaited()
+    assert worker.state["sequence_running"] is True
     assert worker.state["target"]["key"] is None
     assert worker.state["latest_image_id"] is None and not worker.images
+    await worker.handle_event({"Event": "SEQUENCE-FINISHED"})
+    assert worker.state["sequence_running"] is False
 
 
-async def test_scheduler_recovers_altitude_coordinates_before_a_new_capture(worker):
+async def test_scheduler_recovers_altitude_coordinates_from_events(worker):
     name = "IC 5146 HOS"
     ra = 21 + 48 / 60 + 6 / 3600
     start = {"Event": "TS-TARGETSTART", "TargetName": name, "Coordinates": {"RA": [], "Dec": []}}
     worker.client.event_history = [start, {"Event": "IMAGE-SAVE"}]
     worker.client.history = [capture(name)]
-    worker.client.target = sequence("Otro objetivo") + sequence(name, ra=ra, status="FINISHED")
     await worker.restore_target_events()
     await worker.poll()
     assert worker.state["target"]["name"] == name and worker.state["target"]["ra"] is None
+    assert worker.state["sequence_running"] is True
 
-    worker.client.target = sequence("Otro objetivo") + sequence(name.lower(), ra=ra)
+    await worker.handle_event({**start, "Coordinates": {"RA": ra, "Dec": 40}})
     await worker.poll()
     target = worker.state["target"]
     assert target["name"] == name and (target["ra"], target["dec"]) == (ra, 40)
     assert worker.state["site"] and worker.state["night"]
     assert worker.state["latest_image_id"] is None and worker.client.downloads == []
 
-    worker.client.target = []
-    await worker.poll()
-    assert worker.state["target"]["key"] == target["key"]
-    await worker.handle_event({**start, "Coordinates": {"RA": ra, "Dec": 40}})
+    await worker.handle_event(start)
     assert worker.state["target"]["key"] == target["key"]
 
 
@@ -257,15 +262,91 @@ async def test_scheduler_context_survives_socket_failure_and_replays_boundaries(
         await worker.handle_event(start)
 
 
+async def test_sequence_updates_recovers_a_running_scheduler_without_reading_the_sequence(worker):
+    recovered = asyncio.Event()
+
+    async def broadcast(message):
+        if message["state"]["sequence_running"] is True:
+            recovered.set()
+
+    worker.broadcast = broadcast
+    worker.socket_connected = True
+    worker.client.get_event_history = AsyncMock(return_value=[
+        {"Event": "SEQUENCE-FINISHED"},
+        {"Event": "SEQUENCE-STARTING"},
+        {"Event": "TS-TARGETSTART", "TargetName": "M31", "Coordinates": {"RA": 1, "Dec": 40}},
+        {"Event": "IMAGE-SAVE"},
+    ])
+    worker.client.get_advanced_sequence = AsyncMock()
+    task = asyncio.create_task(worker.sequence_updates())
+    try:
+        await worker.poll()
+        await asyncio.wait_for(recovered.wait(), 1)
+        assert worker.state["target"]["name"] == "M31"
+        worker.client.get_event_history.assert_awaited_once()
+        worker.client.get_advanced_sequence.assert_not_awaited()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_capture_names_ordinary_target_when_legacy_sequence_has_only_block_status(worker):
+    worker.client.target = [{"Name": "Imaging_Container", "Status": "RUNNING", "Items": []}]
+    worker.client.history.append(capture("Objetivo anterior"))
+    await worker.poll()
+    await worker.refresh_advanced_sequence()
+    assert worker.state["latest_image_id"] is None
+
+    worker.client.history.append(capture("M31", index=2))
+    await worker.poll()
+    assert worker.state["target"]["name"] == "M31"
+    assert worker.state["target"]["ra"] is None
+    assert worker.images["one"]["index"] == 1
+
+
+async def test_exoplanet_uses_recent_tracking_position_without_changing_capture_identity(worker):
+    worker.client.target = [{"Name": "Imaging_Container", "Status": "RUNNING", "Items": [
+        {"Name": "ExoPlanet Object Container_Container", "Status": "RUNNING"},
+    ]}]
+    mount = {"Connected": True, "TrackingEnabled": True, "Slewing": True,
+             "Coordinates": {"RA": 2.5, "Dec": -10, "Epoch": "JNOW"}}
+    worker.client.get_mount_info = AsyncMock(return_value=mount)
+    await worker.poll()
+    await worker.refresh_advanced_sequence()
+
+    def fresh_capture(index, name="TOI-1728 b"):
+        return {**capture(name, index=index), "Date": dt.datetime.now(dt.timezone.utc).isoformat()}
+
+    worker.client.history.append(fresh_capture(1))
+    await worker.poll()
+    original_key = worker.state["target"]["key"]
+    assert worker.state["target"]["ra"] is None
+
+    mount["Slewing"] = False
+    worker.client.history.append(fresh_capture(2))
+    await worker.poll()
+    target = worker.state["target"]
+    assert target["key"] == original_key and target["name"] == "TOI-1728 b"
+    assert (target["ra"], target["dec"], target["epoch"]) == (2.5, -10, "JNOW")
+    assert target["coordinates_source"] == "mount" and target["filter_summary"]["L"]["count"] == 2
+    assert worker.images["one"]["index"] == 1
+
+    worker.client.history.append(capture("Otro objetivo", index=3))
+    await worker.poll()
+    assert worker.state["target"]["name"] == "Otro objetivo"
+    assert worker.state["target"]["ra"] is None
+
+
 @pytest.mark.asyncio
 async def test_advanced_sequence_state_requires_a_running_block_and_is_invalidated_on_finish(worker):
-    assert worker.state["sequence_running"] is False
+    assert worker.state["sequence_running"] is None
     worker.client.target = [{"GlobalTriggers": [{"Status": "RUNNING"}]}, {"Name": "Inicio", "Status": "CREATED"}]
     await worker.poll()
+    await worker.refresh_advanced_sequence()
     assert worker.state["connected"] and worker.state["sequence_running"] is False
 
     worker.client.target[1]["Status"] = "RUNNING"
-    await worker.poll()
+    await worker.refresh_advanced_sequence()
     assert worker.state["sequence_running"] is True
     assert worker.state["target"]["key"] is None
 
@@ -273,22 +354,24 @@ async def test_advanced_sequence_state_requires_a_running_block_and_is_invalidat
         await worker.handle_event({"Event": "SEQUENCE-FINISHED"})
         return worker.client.target
 
-    worker.client.get_sequence = stale_poll
-    await worker.poll()
+    worker.client.get_advanced_sequence = stale_poll
+    await worker.refresh_advanced_sequence()
     assert worker.state["sequence_running"] is False
     assert worker.wake.is_set()
 
-    worker.client.get_sequence = AsyncMock(return_value=worker.client.target)
-    await worker.poll()
+    await worker.handle_event({"Event": "SEQUENCE-STARTING"})
+    worker.client.get_advanced_sequence = AsyncMock(return_value=worker.client.target)
+    await worker.refresh_advanced_sequence()
     assert worker.state["sequence_running"] is True
-    worker.client.get_sequence.side_effect = OSError("sin estado de secuencia")
-    await worker.poll()
-    assert worker.state["connected"] and worker.state["sequence_running"] is False
+    worker.client.get_advanced_sequence.side_effect = OSError("sin estado de secuencia")
+    await worker.refresh_advanced_sequence()
+    assert worker.state["connected"] and worker.state["sequence_running"] is None
 
 
 @pytest.mark.asyncio
 async def test_worker_updates_every_capture_caches_site_and_survives_weather(worker):
     await worker.poll()
+    await worker.refresh_advanced_sequence()
     assert worker.state["connected"] and worker.state["weather"] is None
     assert worker.state["latest_image_id"] is None
     night = worker.state["night"]
@@ -305,6 +388,7 @@ async def test_worker_updates_every_capture_caches_site_and_survives_weather(wor
     assert len(worker.state["hfr_history"]) == 3
     assert worker.state["target"]["filter_summary"]["L"]["count"] == 10
     worker.client.target = sequence("M42")
+    await worker.refresh_advanced_sequence()
     await worker.poll()
     assert worker.state["latest_image_id"] is None and not worker.images
     worker.client.history.append(capture(index=10))  # respuesta tardía del objeto anterior
@@ -318,9 +402,10 @@ async def test_worker_updates_every_capture_caches_site_and_survives_weather(wor
 @pytest.mark.asyncio
 async def test_target_changes_during_download_are_discarded(worker):
     await worker.poll()
+    await worker.handle_event({"Event": "TS-TARGETSTART", "TargetName": "M31"})
     worker.client.history.append(capture())
     async def change():
-        worker.client.target = sequence("M42")
+        await worker.handle_event({"Event": "TS-TARGETSTART", "TargetName": "M42"})
     worker.client.on_download = change
     await worker.poll()
     assert worker.state["target"]["name"] == "M42"
@@ -446,6 +531,7 @@ async def test_independent_setups_and_recovery(worker):
     second.client = FakeNina()
     second.client.target = sequence("M42")
     await asyncio.gather(worker.poll(), second.poll())
+    await asyncio.gather(worker.refresh_advanced_sequence(), second.refresh_advanced_sequence())
     worker.client.history.append(capture())
     second.client.history.append(capture("M42"))
     await asyncio.gather(worker.poll(), second.poll())

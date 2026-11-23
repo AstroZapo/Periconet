@@ -3,6 +3,7 @@
   "hfr_history_points": 60,
   "observatory_name": "Mi Observatorio",
   "port": 8000,
+  "log_level": "INFO",
   "setups": [
     {
       "id": "setup1",

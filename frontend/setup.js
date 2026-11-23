@@ -59,6 +59,7 @@ async function save() {
       observatory_name: document.getElementById("observatory-name").value.trim(),
       setups,
       port: Number(document.getElementById("port").value || 8000),
+      log_level: document.getElementById("log-level").value,
       extra_images: [...extras, ...extraImages.slice(2)]
     };
     const headers = {"Content-Type": "application/json"};
@@ -90,6 +91,7 @@ saveButton.disabled = true;
 fetch("/api/config").then(r => { if (!r.ok) throw new Error(); return r.json(); }).then(data => {
   document.getElementById("observatory-name").value = data.observatory_name || "";
   document.getElementById("port").value = data.port || 8000;
+  document.getElementById("log-level").value = data.log_level || "INFO";
   extraImages = data.extra_images || [];
   extraImages.slice(0, 2).forEach((item, i) => {
     const card = document.getElementById(`extra-${i}`);

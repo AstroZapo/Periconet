@@ -46,7 +46,7 @@ from clients.nina_client import NinaError
 from monitoring import fingerprint
 from workers import NinaWorker, build_state, phd2_loop
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("periconet")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 BASE_DIR = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
@@ -103,6 +103,7 @@ class SetupsPayload(BaseModel):
     setups: list[SetupInput]
     extra_images: list[ExtraImageInput] | None = None
     port: int | None = Field(default=None, ge=1024, le=65535)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] | None = None
     camera_settings: CamerasPayload | None = None
 
     @model_validator(mode="after")
@@ -117,12 +118,14 @@ class SetupsPayload(BaseModel):
 
 
 DEFAULT_CONFIG = {"poll_interval_seconds": 5, "hfr_history_points": 60,
-                  "observatory_name": "", "port": 8000, "setups": [], "extra_images": [], "cameras": []}
+                  "observatory_name": "", "port": 8000, "log_level": "INFO",
+                  "setups": [], "extra_images": [], "cameras": []}
 CONFIG = dict(DEFAULT_CONFIG)
 if CONFIG_PATH.exists():
     try:
         CONFIG.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig")))
         parsed = SetupsPayload.model_validate(CONFIG)
+        CONFIG["log_level"] = parsed.log_level or DEFAULT_CONFIG["log_level"]
         CONFIG["setups"] = [dict(s.model_dump(), id=s.id or uuid.uuid4().hex) for s in parsed.setups]
         try:
             cameras = TypeAdapter(list[StoredCamera]).validate_python(CONFIG["cameras"])
@@ -199,6 +202,7 @@ async def stop_setup(key):
 
 @asynccontextmanager
 async def lifespan(app):
+    logger.setLevel(CONFIG["log_level"])
     if not CONFIG_PATH.exists():
         save_config(CONFIG)
     try:
@@ -236,6 +240,8 @@ async def save_setup(request: Request, response: Response):
         new = dict(CONFIG, setups=setups, observatory_name=payload.observatory_name)
         if payload.port is not None:
             new["port"] = payload.port
+        if payload.log_level is not None:
+            new["log_level"] = payload.log_level
         if payload.extra_images is not None:
             new["extra_images"] = [e.model_dump() for e in payload.extra_images]
         retired_credentials = set()
@@ -256,6 +262,7 @@ async def save_setup(request: Request, response: Response):
             STATE.pop(key, None)
         CONFIG.clear()
         CONFIG.update(new)
+        logger.setLevel(new["log_level"])
         forget_camera_credentials(retired_credentials)
         for setup in setups:
             key = setup["id"]
@@ -276,7 +283,7 @@ async def save_setup(request: Request, response: Response):
 
 @app.get("/api/config")
 async def get_config():
-    return {key: CONFIG.get(key) for key in ("setups", "observatory_name", "extra_images", "port")} | {
+    return {key: CONFIG.get(key) for key in ("setups", "observatory_name", "extra_images", "port", "log_level")} | {
         "revision": config_revision(),
         "cameras": [
             {key: camera[key] for key in ("id", "name", "refresh_seconds")} for camera in CONFIG["cameras"]
@@ -415,7 +422,9 @@ async def skip_sequence_to_end(setup_id: str, request: Request):
         raise HTTPException(409, "Ya hay una orden en curso para este equipo")
     async with worker.sequence_end_lock:
         try:
+            logger.debug("NINA %s: solicitando el salto al bloque final", setup_id)
             await worker.client.skip_sequence_to_end()
+            logger.debug("NINA %s: salto al bloque final confirmado", setup_id)
         except httpx.TimeoutException as exc:
             raise HTTPException(504, "NINA no respondió a tiempo. Comprueba la secuencia antes de repetir la orden.") from exc
         except httpx.HTTPStatusError as exc:
@@ -475,23 +484,26 @@ async def get_latest_hires_image(setup_id: str, request: Request):
         return Response(status_code=404, headers={"Cache-Control": "no-store"})
     try:
         async with record["lock"]:
+            generation, item, index = record["generation"], record["item"], record["index"]
+            if IMAGES.get(setup_id) is not record or not worker.image_target_is_current(generation, item):
+                return Response(status_code=409)
             if not record["hires"]:
                 client = record["client"]
-                if await client.get_history_item(record["index"]) != record["item"]:
+                if await client.get_history_item(index) != item:
                     return Response(status_code=409)
-                data = await client.get_image_bytes(record["index"], quality=65, resize=False)
-                if not await worker.refresh_target():
+                if IMAGES.get(setup_id) is not record or not worker.image_target_is_current(generation, item):
                     return Response(status_code=409)
-                if IMAGES.get(setup_id) is not record or await client.get_history_item(record["index"]) != record["item"]:
-                    return Response(status_code=409)
+                data = await client.get_image_bytes(index, quality=65, resize=False)
                 if not data:
                     return Response(status_code=404)
+                if await client.get_history_item(index) != item:
+                    return Response(status_code=409)
+                if IMAGES.get(setup_id) is not record or not worker.image_target_is_current(generation, item):
+                    return Response(status_code=409)
                 record["hires"] = data
-            if IMAGES.get(setup_id) is not record:
-                return Response(status_code=409)
             return image_response(record["hires"], request)
-    except Exception as exc:
-        logger.debug("Imagen HD %s no disponible: %s", setup_id, exc)
+    except Exception:
+        logger.debug("Imagen HD %s no disponible", setup_id, exc_info=True)
         return Response(status_code=502)
 
 
