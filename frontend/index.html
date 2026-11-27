@@ -132,7 +132,31 @@
   .badge.perdida, .badge.unsafe { color: var(--danger); }
   .badge.detenido { color: var(--warn); }
 
-  .panel-body { display: grid; grid-template-columns: 1fr 1fr; gap: 0; align-items: start; }
+  .panel-body { display: grid; grid-template-columns: 1.3fr 1fr; gap: 0; align-items: stretch; }
+  /* Versión Mac: imagen del equipo en 4:3 (no panorámica) */
+  .image-cell { aspect-ratio: 4 / 3; }
+  .image-cell img { width: 100% !important; height: 100% !important; object-fit: contain; }
+  /* Columna derecha de arriba abajo (Cloud Watcher) */
+  #layout { display: grid; grid-template-columns: minmax(0, 1fr); }
+  #layout.has-side { grid-template-columns: minmax(0, 1fr) clamp(340px, 22vw, 640px); }
+  #layout-side:empty { display: none; }
+  #layout-side { padding: 24px 24px 24px 0; display: flex; min-height: 0; }
+  #layout-side .extra-card { flex: 1 1 auto; max-width: none; min-width: 0; display: flex; flex-direction: column; }
+  #layout-side .extra-body { flex: 1; }
+  #layout-side .extra-body img { height: 100%; object-fit: contain; }
+  #layout-side .page-frame { flex: 1; aspect-ratio: auto; min-height: 500px; }
+  .zoom-btn {
+    background: none; border: 1px solid var(--panel-border); color: var(--text-dim);
+    border-radius: 4px; font: 0.75rem var(--mono); padding: 0 6px; margin-left: 6px; cursor: pointer;
+  }
+  .zoom-btn:hover { color: var(--text); border-color: var(--text-dim); }
+  @media (max-width: 1400px) {
+    #layout.has-side { grid-template-columns: minmax(0, 1fr); }
+    #layout-side { padding: 0 24px 24px; }
+    #layout-side .page-frame { min-height: 80vh; }
+  }
+  .image-data { background: var(--panel); flex: 1; }
+  .image-data .block:last-child { border-bottom: 0; }
 
   .image-col {
     display: flex;
@@ -252,7 +276,7 @@
 
   .hfr-list {
     font-family: var(--mono); font-size: 0.82rem;
-    max-height: 110px; overflow-y: auto;
+    max-height: 190px; overflow-y: auto;
     display: flex; flex-direction: column; gap: 3px;
   }
   .hfr-list .hfr-row {
@@ -261,7 +285,7 @@
     gap: 10px;
     align-items: start;
   }
-  .hfr-list .idx { color: var(--text-dim); overflow-wrap: anywhere; }
+  .hfr-list .idx { color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .hfr-list .val { color: var(--ok); text-align: right; }
 
   /* Objetivo y gráfica de altura (Target Scheduler) */
@@ -293,7 +317,7 @@
   .weather-grid .value { text-align: right; }
 
   #extras {
-    display: flex; flex-wrap: wrap; justify-content: center;
+    display: flex; flex-wrap: wrap; justify-content: flex-start; align-items: flex-start;
     gap: 20px; padding: 0 24px 24px;
   }
   #extras:empty { display: none; }
@@ -310,11 +334,89 @@
   }
   .extra-card img { width: 100%; height: auto; display: block; }
   .extra-card .placeholder { color: var(--text-dim); font-family: var(--mono); font-size: 0.8rem; padding: 30px; }
-  #extras.with-cameras {
-    display: grid;
-    grid-template-columns: repeat(var(--extra-columns), minmax(0, 620px));
-    align-items: start;
+  /* Alarmas (versión Mac/Windows) */
+  @keyframes alert-panel-blink {
+    0%, 100% { border-color: #e8392b; box-shadow: 0 0 0 2px #e8392b, 0 0 24px #e8392b88; }
+    50% { border-color: var(--panel-border); box-shadow: none; }
   }
+  @keyframes alert-guide-blink { 0%, 100% { background: #5a3a00; } 50% { background: transparent; } }
+  .panel.alert-error { animation: alert-panel-blink 1s steps(2, jump-none) infinite; }
+  .panel.alert-star .guide-block { animation: alert-guide-blink 1s steps(2, jump-none) infinite; }
+  .alert-banner { display: flex; align-items: center; gap: 10px; padding: 6px 16px;
+    background: #3a0d0d; color: #ffd6d0; font-size: 0.8rem; border-bottom: 1px solid #e8392b; }
+  .alert-banner.star { background: #3a2a00; color: #ffe9b0; border-bottom-color: #ffc531; }
+  .alert-banner[hidden] { display: none; }
+  .alert-banner .alert-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alert-banner button { background: #000; color: #fff; border: 1px solid currentColor; border-radius: 4px;
+    font: 0.75rem var(--mono); padding: 3px 10px; cursor: pointer; }
+  #alerts-clear-all[hidden] { display: none; }
+
+  /* Techo Talon6 (versión Mac) */
+  .extra-card[hidden] { display: none !important; }
+  .extra-stack { position: relative; align-self: stretch; min-width: 0; min-height: 420px; }
+  .extra-stack-inner { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 12px; }
+  .extra-stack-inner > .extra-card.extra-card { flex: none; max-width: none; min-width: 0; }
+  .extra-stack-inner > .extra-card.extra-card:not(.roof-card) {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+  }
+  .extra-stack-inner > .extra-card:not(.roof-card) .extra-body { flex: 1; min-height: 0; }
+  .extra-stack-inner > .extra-card:not(.roof-card) .extra-body img { height: 100%; object-fit: contain; }
+  .roof-card { background: #1d4744; border-color: #5f8f8b; color: #fff; }
+  .roof-card .panel-header { background: #163a37; border-bottom-color: #5f8f8b; }
+  .roof-card .panel-header h2 { color: #fff; font-size: 0.85rem; }
+  .roof-card .panel-header { padding-top: 6px; padding-bottom: 6px; }
+  .talon-body { padding: 6px 8px; display: flex; flex-direction: column; gap: 6px; }
+  .talon-msg { background: #9ff4f7; color: #003; min-height: 1.4em; padding: 1px 6px;
+    border: 2px solid #dff; font: 600 0.72rem var(--mono); border-radius: 2px; }
+  .talon-msg.error { background: #ffb4b4; color: #400; }
+  .talon-status { background: #000; padding: 4px 8px; display: grid;
+    grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 0.75rem; }
+  .talon-status .lbl { color: #fff; }
+  .talon-status .val { color: #ffe94d; font-family: var(--mono); font-weight: 700; text-align: right;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .talon-buttons { display: flex; gap: 10px; justify-content: center; align-items: center; padding: 5px;
+    border: 2px solid #cfe; border-radius: 2px; }
+  .talon-btn { background: #9ff4f7; color: #000; font: 700 0.8rem system-ui, sans-serif;
+    border: 2px outset #dff; padding: 3px 12px; cursor: pointer; min-width: 72px; }
+  .talon-btn:active { border-style: inset; }
+  .talon-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .talon-stop-row { display: none; }
+  .talon-stop { background: #5ef05e; color: #000; font: 700 1rem system-ui, sans-serif;
+    border: 3px outset #bfb; padding: 2px 18px; cursor: pointer; }
+  .talon-stop:active { border-style: inset; }
+  .talon-stop:disabled { opacity: 0.45; cursor: not-allowed; }
+  .talon-switches { background: #000; border: 2px solid #ddd; border-radius: 2px;
+    margin: 0; padding: 2px 8px 6px; display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px 10px; font-size: 0.7rem; }
+  .talon-switches legend { color: #fff; font-size: 0.68rem; padding: 0 4px; }
+  .talon-led { display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    color: #ddd; white-space: nowrap; overflow: hidden; }
+  .talon-led i { flex: none; width: 10px; height: 10px; border-radius: 50%;
+    background: #777; box-shadow: inset 0 -2px 3px #0006; }
+  .talon-led.on i { background: #5ee85e; }
+  .talon-led.alarm i { background: #e8392b; }
+  .talon-led.moving i { background: #ffc531; animation: talon-blink 1s steps(2) infinite; }
+  .talon-led.unknown i { background: #333; box-shadow: inset 0 0 0 1px #666; }
+  @keyframes talon-blink { 50% { opacity: 0.25; } }
+  .talon-footer { height: 6px; background: #4a72c8; border-radius: 2px; }
+  /* Tamaños de tarjeta (versión Mac) */
+  /* Todas en una fila si caben; el tamaño es el peso relativo de cada tarjeta. */
+  .extra-card.size-small, .extra-stack.size-small { flex: 1 1 0; min-width: 260px; max-width: 560px; }
+  .extra-card.size-normal, .extra-stack.size-normal { flex: 1.5 1 0; min-width: 340px; max-width: 820px; }
+  .extra-card.size-large, .extra-stack.size-large { flex: 2.2 1 0; min-width: 440px; max-width: 1200px; }
+  .extra-card.camera-card:not([class*="size-"]) { flex: 1.5 1 0; min-width: 340px; max-width: 820px; }
+  .extra-card .open-link { color: var(--text-dim); font-size: 0.75rem; text-decoration: none; margin-left: 8px; }
+  .extra-card .open-link:hover { color: var(--text); }
+  .camera-frame { aspect-ratio: 3 / 2 !important; }
+  .page-frame {
+    position: relative; width: 100%; aspect-ratio: var(--page-aspect, 3 / 2);
+    overflow: hidden; background: #000;
+  }
+  .page-frame iframe {
+    position: absolute; top: 0; left: 0; border: 0; background: #000;
+    transform-origin: 0 0;
+  }
+  .page-frame iframe.loading { visibility: hidden; }
   .extra-card.camera-card { min-width: 0; overflow: visible; }
   .camera-card .panel-header { gap: 8px; }
   .camera-picker { position: relative; min-width: 0; }
@@ -357,7 +459,7 @@
     background: #08080a; color: var(--text-dim); font-size: 0.8rem; text-align: center;
   }
   @media (max-width: 820px) {
-    #extras.with-cameras { grid-template-columns: minmax(0, 620px); }
+    .extra-card.size-small, .extra-card.size-normal, .extra-card.size-large { flex-basis: 100%; }
   }
   @media (pointer: coarse) {
     .camera-summary, .camera-choice { min-height: 44px; }
@@ -522,14 +624,17 @@
     <div class="brand-tag" id="brand-tag" style="display:none">Periconet</div>
   </div>
   <div style="display:flex;align-items:center;gap:16px;">
+    <button id="alerts-clear-all" hidden title="Desactivar el parpadeo de todos los equipos" style="background:#5a1010;border:1px solid #e8392b;border-radius:4px;color:#fff;padding:6px 10px;cursor:pointer;font-family:var(--mono);font-size:0.8rem;margin-right:8px;">⚠ Desactivar alarmas</button>
     <button id="sound-toggle" title="Silenciar/activar aviso de estrella perdida" style="background:#1a1a1d;border:1px solid var(--panel-border);border-radius:4px;color:var(--text);padding:6px 10px;cursor:pointer;font-family:var(--mono);font-size:0.85rem;">🔔</button>
     <div class="clock" id="clock">--:--:--</div>
   </div>
 </header>
 
+<div id="layout"><div id="layout-main">
 <main id="panels"></main>
 
 <section id="extras"></section>
+</div><aside id="layout-side"></aside></div>
 
 <!-- Visor Lightbox de Alta Resolución con Zoom & Pan -->
 <div id="image-modal" class="image-modal" style="display:none">
@@ -556,7 +661,7 @@
   </div>
 </div>
 
-<footer>panel de monitorización local · sin acciones de control, solo lectura · <a href="/setup">editar setups</a></footer>
+<footer>panel de monitorización y control del observatorio · <a href="/setup">editar setups</a><span id="shutdown-wrap" hidden> · <a href="#" id="shutdown-link">cerrar Periconet</a></span></footer>
 
 <script src="/static/dashboard.js" defer></script>
 

@@ -1,5 +1,32 @@
 let count = 0;
 let extraImages = [];
+const EXTRA_SLOTS = [
+  {label: "gráfico de seeing", title: "Seeing de la noche", url: "https://.../SeeingGraph.png", refresh: 300},
+  {label: "cámara all-sky", title: "All-sky", url: "http://192.168.1.40:5000/", refresh: 60},
+  {label: "cloud watcher", title: "Cloud Watcher", url: "http://192.168.1.41/", refresh: 60},
+  {label: "otra", title: "Otra imagen", url: "http://.../image.jpg", refresh: 60},
+];
+function buildExtraSlots() {
+  const container = document.getElementById("extra-slots");
+  EXTRA_SLOTS.forEach((slot, i) => {
+    const card = document.createElement("div");
+    card.className = "setup-card";
+    card.id = `extra-${i}`;
+    card.innerHTML = `
+      <label>Título · ${slot.label}</label>
+      <input class="x-title" maxlength="200" placeholder="${slot.title}">
+      <div class="row">
+        <div><label>URL</label><input class="x-url" maxlength="2048" placeholder="${slot.url}"></div>
+        <div><label>Refresco (s)</label><input class="x-refresh" type="number" min="10" max="86400" step="1" placeholder="${slot.refresh}"></div>
+      </div>
+      <div class="row">
+        <div><label>Tipo</label><select class="x-kind"><option value="image">Imagen (JPG/PNG)</option><option value="page">Página web completa</option></select></div>
+        <div><label>Tamaño</label><select class="x-size"><option value="small">Pequeño</option><option value="normal" selected>Normal</option><option value="large">Grande</option><option value="side">Columna derecha (de arriba abajo)</option></select></div>
+      </div>`;
+    container.appendChild(card);
+  });
+}
+buildExtraSlots();
 function addSetup(values = {}) {
   const card = document.createElement("div");
   card.className = "setup-card";
@@ -30,7 +57,7 @@ function showStatus(message, error = false) {
   status.textContent = message;
 }
 async function save() {
-  for (const input of document.querySelectorAll(".wrap > input, #setups input, #extra-0 input, #extra-1 input")) {
+  for (const input of document.querySelectorAll(".wrap > input, #setups input, #extra-slots input, #roof-alpaca input")) {
     if (!input.reportValidity()) return;
   }
   if (cameraSettingsDirty) {
@@ -47,10 +74,11 @@ async function save() {
   });
   const names = setups.map(s => s.name.toLocaleLowerCase());
   if (new Set(names).size !== names.length) { showStatus("Cada equipo debe tener un nombre diferente.", true); return; }
-  const extras = [0, 1].map(i => {
+  const extras = EXTRA_SLOTS.map((slot, i) => {
     const card = document.getElementById(`extra-${i}`);
     return {title:card.querySelector(".x-title").value.trim(), url:card.querySelector(".x-url").value.trim(),
-      refresh_seconds:Number(card.querySelector(".x-refresh").value || (i === 0 ? 300 : 60))};
+      refresh_seconds:Number(card.querySelector(".x-refresh").value || slot.refresh),
+      kind:card.querySelector(".x-kind").value, size:card.querySelector(".x-size").value};
   });
   saveButton.disabled = true;
   cameraFields.disabled = true;
@@ -60,7 +88,10 @@ async function save() {
       setups,
       port: Number(document.getElementById("port").value || 8000),
       log_level: document.getElementById("log-level").value,
-      extra_images: [...extras, ...extraImages.slice(2)]
+      extra_images: [...extras, ...extraImages.slice(EXTRA_SLOTS.length)],
+      roof_alpaca_url: document.querySelector("#roof-alpaca .r-url").value.trim(),
+      roof_alpaca_device: Number(document.querySelector("#roof-alpaca .r-device").value || 0),
+      roof_alpaca_host: document.querySelector("#roof-alpaca .r-host").value.trim()
     };
     const headers = {"Content-Type": "application/json"};
     if (cameraSettingsDirty) {
@@ -93,11 +124,16 @@ fetch("/api/config").then(r => { if (!r.ok) throw new Error(); return r.json(); 
   document.getElementById("port").value = data.port || 8000;
   document.getElementById("log-level").value = data.log_level || "INFO";
   extraImages = data.extra_images || [];
-  extraImages.slice(0, 2).forEach((item, i) => {
+  document.querySelector("#roof-alpaca .r-url").value = data.roof_alpaca_url || "";
+  document.querySelector("#roof-alpaca .r-device").value = data.roof_alpaca_device ?? 0;
+  document.querySelector("#roof-alpaca .r-host").value = data.roof_alpaca_host || "";
+  extraImages.slice(0, EXTRA_SLOTS.length).forEach((item, i) => {
     const card = document.getElementById(`extra-${i}`);
     card.querySelector(".x-title").value = item.title || "";
     card.querySelector(".x-url").value = item.url || "";
     card.querySelector(".x-refresh").value = item.refresh_seconds || 60;
+    card.querySelector(".x-kind").value = item.kind || "image";
+    card.querySelector(".x-size").value = item.size || "normal";
   });
   if (data.setups?.length) data.setups.forEach(addSetup); else addSetup();
   saveButton.disabled = false;
@@ -153,11 +189,11 @@ function addCamera(values = {}) {
     if (isProtected && values.protected_url) {
       message = values.credentials_missing
         ? "La URL protegida no está disponible en esta cuenta. Vuelve a introducirla."
-        : "URL protegida guardada en Windows. Deja el campo vacío para conservarla.";
+        : "URL protegida guardada en el almacén seguro del sistema. Deja el campo vacío para conservarla.";
     } else if (!isProtected && savedSeparateCredentials) {
       message = values.credentials_missing
         ? "Las credenciales no están disponibles en esta cuenta. Vuelve a introducirlas."
-        : "Credenciales guardadas en Windows. Deja los campos vacíos para conservarlas.";
+        : "Credenciales guardadas en el almacén seguro del sistema. Deja los campos vacíos para conservarlas.";
     }
     credentialStatus.textContent = message;
     credentialStatus.hidden = !message;
@@ -203,7 +239,7 @@ function collectCameraSettings() {
 async function loadCameraSettings() {
   const loadError = "No se pudo cargar la configuración de cámaras. Recarga la página para reintentar.";
   if (!["localhost", "127.0.0.1", "[::1]"].includes(location.hostname)) {
-    showCameraSettingsStatus("Abre esta página desde localhost en el PC de Periconet para configurar las cámaras.");
+    showCameraSettingsStatus("Abre esta página desde localhost en el equipo de Periconet para configurar las cámaras.");
     return;
   }
   const controller = new AbortController();
@@ -235,3 +271,25 @@ cameraEntries.addEventListener("input", () => {
   cameraSettingsDirty = true;
 });
 loadCameraSettings();
+
+// Cerrar Periconet (solo desde el propio equipo).
+(() => {
+  const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(location.hostname);
+  const wrap = document.getElementById("shutdown-wrap");
+  const link = document.getElementById("shutdown-link");
+  if (!local || !wrap || !link) return;
+  wrap.hidden = false;
+  link.addEventListener("click", async event => {
+    event.preventDefault();
+    if (!window.confirm("¿Cerrar Periconet?")) return;
+    try {
+      const response = await fetch("/api/shutdown", {method: "POST", headers: {"X-Periconet-Action": "shutdown"}});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "No se pudo cerrar.");
+      document.body.innerHTML = '<p style="font:1rem system-ui;color:#ccc;text-align:center;margin-top:20vh">' +
+        "Periconet se ha cerrado. Puedes cerrar esta pestaña.</p>";
+    } catch (error) {
+      window.alert(error.message || "No se pudo cerrar Periconet.");
+    }
+  });
+})();

@@ -1,0 +1,38 @@
+PERICONET PARA WINDOWS
+======================
+
+Panel web de monitorización del observatorio: varios equipos con NINA
+(Advanced API) y PHD2, imagen de la última captura, HFR, guiado en vivo,
+meridian flip, meteorología, gráfico de la noche, cámaras IP, imágenes
+o páginas web extra (all-sky, seeing, cloud watcher...) y el
+panel del techo Talon6 R.O.R. (por NINA o directo por ASCOM Alpaca).
+
+INSTALACIÓN
+1. Instala Python 3.13 desde https://www.python.org/downloads/windows/
+   (marca «Add python.exe to PATH» en la primera pantalla del instalador).
+2. Copia esta carpeta donde quieras (por ejemplo C:\Periconet).
+3. Doble clic en Periconet.bat. La primera vez tarda 1-2 minutos
+   (descarga componentes). Se abrirá el navegador con la página de
+   configuración y aparecerá el icono rojo en la bandeja, junto al reloj
+   (Abrir dashboard / Salir).
+
+CONFIGURACIÓN
+- Añade un «setup» por equipo: IP del PC con NINA (Advanced API activada,
+  puerto 1888 por defecto) y, si quieres, la IP de PHD2 (puerto 4400).
+- Imágenes y páginas: 4 huecos. «Imagen» = dirección directa de un JPG/PNG.
+  «Página web completa» = muestra una web entera (botones − / + para el zoom).
+  Tamaño: pequeño / normal / grande / columna derecha.
+- Cámaras IP: URL de captura JPEG y usuario/contraseña (se guardan en el
+  Administrador de credenciales de Windows).
+- Techo Talon6: funciona si NINA tiene conectada la cúpula Talon6_ROR. Opcional:
+  dirección del servidor ASCOM Alpaca de Talon6 para controlarlo directamente
+  (aunque NINA esté cerrado).
+- La configuración se guarda en config.json, en esta misma carpeta.
+
+OPCIONAL: CREAR Periconet.exe
+- Con el entorno ya preparado (paso 3), doble clic en crear_exe.bat.
+  Genera dist\Periconet.exe.
+
+PROBLEMAS
+- Registros en la carpeta logs\ (launcher.log).
+- Si el puerto 8000 está ocupado, cambia "port" en config.json.

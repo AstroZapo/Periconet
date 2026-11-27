@@ -43,12 +43,17 @@ class NinaClient:
         try:
             response = await self.http.get(url, params=params, headers=headers)
         except Exception as exc:
-            logger.debug("NINA HTTP #%d GET %s falló en %.1f ms (%s: %s)", request_id, url,
-                         (perf_counter() - started) * 1000, type(exc).__name__, str(exc) or "sin mensaje")
+            logger.debug(
+                "NINA HTTP #%d GET %s falló en %.1f ms (%s: %s)",
+                request_id, url, (perf_counter() - started) * 1000,
+                type(exc).__name__, str(exc) or "sin mensaje",
+            )
             raise
-        logger.debug("NINA HTTP #%d GET %s respondió HTTP %d en %.1f ms (%d bytes, %s)", request_id, url,
-                     response.status_code, (perf_counter() - started) * 1000,
-                     len(response.content), response.headers.get("content-type", "sin Content-Type"))
+        logger.debug(
+            "NINA HTTP #%d GET %s respondió HTTP %d en %.1f ms (%d bytes, %s)",
+            request_id, url, response.status_code, (perf_counter() - started) * 1000,
+            len(response.content), response.headers.get("content-type", "sin Content-Type"),
+        )
         return response
 
     async def _get(self, path, params=None):
@@ -83,6 +88,16 @@ class NinaClient:
 
     async def get_profile(self):
         return await self._get("/profile/show", {"active": "true"})
+
+    async def get_dome_info(self):
+        return await self._get("/equipment/dome/info")
+
+    async def dome_command(self, action):
+        """Versión Mac: open / close / stop de la cúpula (techo Talon6 vía ASCOM)."""
+        response = await self._request(
+            f"/equipment/dome/{action}", headers={"Cache-Control": "no-cache, no-store"}
+        )
+        return self._read_json(response, require_success=True)
 
     async def get_advanced_sequence(self):
         return await self._get("/sequence/json")
@@ -120,8 +135,10 @@ class NinaClient:
         return int(await self.get_history(count="true") or 0)
 
     async def get_image_bytes(self, index, quality=80, resize=True):
-        response = await self._request(f"/image/{index}", params={
-            "quality": quality, "resize": "true" if resize else "false", "stream": "true"})
+        response = await self._request(
+            f"/image/{index}",
+            params={"quality": quality, "resize": "true" if resize else "false", "stream": "true"},
+        )
         if response.headers.get("content-type", "").startswith("image/"):
             response.raise_for_status()
             return response.content or None

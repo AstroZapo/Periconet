@@ -91,7 +91,7 @@
   <p class="subtitle">Añade un setup por cada telescopio/mini-PC de tu observatorio. Necesitas su nombre y las IPs donde corren NINA (Advanced API) y PHD2.</p>
 
   <label>Nombre del observatorio</label>
-  <input id="observatory-name" placeholder="Ej: Observatorio Can Jordi" style="margin-bottom: 24px;">
+  <input id="observatory-name" placeholder="Ej: Mi observatorio" style="margin-bottom: 24px;">
 
   <label>Puerto del servidor web</label>
   <input id="port" type="number" min="1024" max="65535" step="1" placeholder="8000" style="margin-bottom: 4px;">
@@ -101,24 +101,20 @@
 
   <button class="add" onclick="addSetup()">+ Añadir setup</button>
 
-  <h2 class="section-title">Imágenes bajo los setups (opcional)</h2>
-  <div class="setup-card" id="extra-0">
-    <label>Título · gráfico de seeing</label>
-    <input class="x-title" placeholder="Seeing de la noche">
+  <h2 class="section-title">Imágenes y páginas bajo los setups (opcional)</h2>
+  <div id="extra-slots"></div>
+  <div style="font-size:0.72rem;color:var(--text-dim);margin:-6px 0 20px;">Deja la URL vacía para no mostrar ese hueco. «Imagen»: dirección directa de un JPG/PNG; la descarga Periconet desde este equipo, así que sirve también una URL accesible solo por VPN. «Página web completa»: muestra la página tal cual (por ejemplo la web de una cámara all-sky); la carga el navegador que mira el dashboard, así que ese navegador tiene que poder llegar a esa IP.</div>
+
+  <h2 class="section-title">Techo Talon6 por Alpaca (opcional)</h2>
+  <div class="setup-card" id="roof-alpaca">
     <div class="row">
-      <div><label>URL de la imagen</label><input class="x-url" placeholder="https://.../SeeingGraph.png"></div>
-      <div><label>Refresco (s)</label><input class="x-refresh" type="number" min="10" max="86400" step="1" placeholder="300"></div>
+      <div><label>Dirección del servidor Alpaca</label><input class="r-url" maxlength="300" placeholder="http://192.168.1.60:11111"></div>
+      <div><label>Nº de dispositivo</label><input class="r-device" type="number" min="0" max="99" step="1" placeholder="0"></div>
     </div>
+    <label>Cabecera Host (solo si el servidor responde «Invalid Hostname»)</label>
+    <input class="r-host" maxlength="255" placeholder="192.168.1.60:11111">
   </div>
-  <div class="setup-card" id="extra-1">
-    <label>Título · cámara all-sky</label>
-    <input class="x-title" placeholder="All-sky">
-    <div class="row">
-      <div><label>URL de la imagen</label><input class="x-url" placeholder="http://.../image.jpg"></div>
-      <div><label>Refresco (s)</label><input class="x-refresh" type="number" min="10" max="86400" step="1" placeholder="60"></div>
-    </div>
-  </div>
-  <div style="font-size:0.72rem;color:var(--text-dim);margin:-6px 0 20px;">Deja la URL vacía para no mostrar esa imagen. La descarga Periconet desde este PC, así que sirve también una URL accesible solo por VPN.</div>
+  <div style="font-size:0.72rem;color:var(--text-dim);margin:-6px 0 20px;">Con la dirección puesta, el panel del techo habla directamente con Talon6 aunque los NINA estén cerrados. Si Alpaca no responde, las órdenes pasan por el NINA que tenga la cúpula conectada. Déjala vacía para usar solo NINA.</div>
 
   <section id="camera-settings" aria-labelledby="camera-settings-title">
     <h2 id="camera-settings-title" class="section-title">Cámaras del observatorio (opcional)</h2>
@@ -174,6 +170,7 @@
   <div id="status"></div>
 </div>
 
+<p id="shutdown-wrap" hidden style="text-align:center;font-size:0.75rem;color:var(--text-dim);margin:24px 0;"><a href="#" id="shutdown-link" style="color:var(--text-dim)">cerrar Periconet</a></p>
 <script src="/static/setup.js" defer></script>
 </body>
 </html>

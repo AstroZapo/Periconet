@@ -16,8 +16,8 @@ class PHD2Client:
     def __init__(self, host: str, port: int = 4400):
         self.host = host
         self.port = port
-        self._reader: asyncio.StreamReader | None = None
-        self._writer: asyncio.StreamWriter | None = None
+        self._reader = None
+        self._writer = None
         self._pending = deque(maxlen=300)
         self._request_id = 0
 
@@ -36,7 +36,10 @@ class PHD2Client:
         await self._writer.drain()
         deadline = asyncio.get_running_loop().time() + 5
         while True:
-            line = await asyncio.wait_for(self._reader.readline(), max(0.001, deadline - asyncio.get_running_loop().time()))
+            line = await asyncio.wait_for(
+                self._reader.readline(),
+                max(0.001, deadline - asyncio.get_running_loop().time()),
+            )
             if not line:
                 raise ConnectionError("PHD2 cerró la conexión mientras esperábamos respuesta")
             line = line.strip()
@@ -86,7 +89,7 @@ class PHD2Client:
                 await self.request("get_app_state")
                 continue
             if not line:
-                break
+                return
             line = line.strip()
             if not line:
                 continue

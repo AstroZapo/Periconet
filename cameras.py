@@ -18,8 +18,9 @@ import camera_credentials
 
 CameraId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
 SECRET_QUERY_FIELDS = {
-    "user", "username", "login", "pass", "password", "passwd", "pwd", "token", "access_token",
-    "auth", "authorization", "apikey", "api_key", "key", "secret", "session", "sessionid", "signature",
+    "access_token", "api_key", "apikey", "auth", "authorization", "key",
+    "login", "pass", "passwd", "password", "pwd", "secret", "session",
+    "sessionid", "signature", "token", "user", "username",
 }
 MAX_SNAPSHOT_BYTES = 12 * 1024 * 1024
 MAX_CAMERA_URL_LENGTH = 2048
@@ -34,7 +35,7 @@ def require_url_without_credentials(value):
 class CameraSettings(BaseModel):
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
     url: Annotated[str, StringConstraints(strip_whitespace=True, max_length=MAX_CAMERA_URL_LENGTH)] | None = Field(
-        default=None, repr=False,
+        default=None, repr=False
     )
     refresh_seconds: int = Field(default=10, ge=10, le=86400)
 
@@ -79,11 +80,11 @@ class CameraInput(CameraSettings):
                 raise ValueError("Deja vacíos Usuario y Contraseña al usar una URL protegida.")
             if self.url and len(self.url.encode("utf-8")) > MAX_CAMERA_URL_LENGTH:
                 raise ValueError("La URL protegida supera el tamaño permitido.")
-        elif self.url:
+            return self
+        if self.url:
             require_url_without_credentials(self.url)
-        else:
-            raise ValueError("Introduce la URL de captura de la cámara.")
-        return self
+            return self
+        raise ValueError("Introduce la URL de captura de la cámara.")
 
 
 def check_unique(cameras):
@@ -130,7 +131,7 @@ def camera_access(item, previous):
         if password and not username and credential_id:
             saved = camera_credentials.read(credential_id)
             username = saved[0] if saved else ""
-        if not (username and password):
+        if not username or not password:
             raise ValueError(f"{item.name}: introduce el usuario y la contraseña de la cámara.")
         return item.url, uuid.uuid4().hex, (username, password)
     elif credential_id and url_origin(item.url) != url_origin(previous["url"]):
@@ -147,13 +148,15 @@ def prepare_cameras(inputs, existing):
         url, credential_id, new_secret = camera_access(item, existing.get(item.id))
         if new_secret is not None:
             pending_credentials[credential_id] = new_secret
-        cameras.append({
-            "id": item.id or uuid.uuid4().hex,
-            "name": item.name,
-            "url": url,
-            "refresh_seconds": item.refresh_seconds,
-            "credential_id": credential_id,
-        })
+        cameras.append(
+            {
+                "id": item.id or uuid.uuid4().hex,
+                "name": item.name,
+                "url": url,
+                "refresh_seconds": item.refresh_seconds,
+                "credential_id": credential_id,
+            }
+        )
     return cameras, pending_credentials
 
 
@@ -191,18 +194,16 @@ async def download_snapshot(camera):
                 if credentials is None:
                     return None
                 auth = CameraAuth(*credentials)
-            async with (
-                httpx.AsyncClient(timeout=8, trust_env=False) as client,
-                client.stream("GET", url, auth=auth) as response,
-            ):
-                response.raise_for_status()
-                data = bytearray()
-                async for chunk in response.aiter_bytes():
-                    if len(data) + len(chunk) > MAX_SNAPSHOT_BYTES:
+            async with httpx.AsyncClient(timeout=8, trust_env=False) as client:
+                async with client.stream("GET", url, auth=auth) as response:
+                    response.raise_for_status()
+                    data = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        if len(data) + len(chunk) > MAX_SNAPSHOT_BYTES:
+                            return None
+                        data.extend(chunk)
+                    if not data.startswith(b"\xff\xd8\xff"):
                         return None
-                    data.extend(chunk)
-                if not data.startswith(b"\xff\xd8\xff"):
-                    return None
-                return bytes(data)
+                    return bytes(data)
     except (OSError, httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError):
         return None

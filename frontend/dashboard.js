@@ -72,6 +72,146 @@ async function skipSequenceToEnd(setup, button, status) {
   }
 }
 
+
+// ---- Techo Talon6 (versión Mac) -------------------------------------------
+// Se controla a través de la cúpula ASCOM conectada en NINA. Talon6 mantiene
+// sus propias protecciones (monturas aparcadas, sensores).
+const ROOF_STATUS = {
+  ShutterOpen: "Open", ShutterClosed: "Closed", ShutterOpening: "Opening",
+  ShutterClosing: "Closing", ShutterError: "Error", ShutterNone: "—",
+};
+let roofEls = null;
+let ROOF_ALPACA = {};
+
+function shortSetupName(name) {
+  return (String(name).split(/[-\s]/)[0] || name).slice(0, 9);
+}
+
+function roofLed(label, title) {
+  const led = el("div", "talon-led unknown");
+  led.appendChild(el("span", null, label));
+  led.appendChild(el("i"));
+  led.title = title;
+  return led;
+}
+
+function buildRoofCard() {
+  const card = el("div", "extra-card roof-card");
+  const header = el("div", "panel-header");
+  header.appendChild(el("h2", null, "Techo · Talon6 R.O.R."));
+  card.appendChild(header);
+  const body = el("div", "talon-body");
+  const msg = el("div", "talon-msg", "");
+  const status = el("div", "talon-status");
+  const statusVal = el("span", "val", "—");
+  const viaVal = el("span", "val", "—");
+  const safeVal = el("span", "val", "—");
+  status.append(el("span", "lbl", "Status:"), statusVal, el("span", "lbl", "Control vía:"), viaVal,
+    el("span", "lbl", "Seguridad:"), safeVal);
+  const buttons = el("div", "talon-buttons");
+  const openBtn = el("button", "talon-btn", "Open");
+  const closeBtn = el("button", "talon-btn", "Close");
+  openBtn.type = closeBtn.type = "button";
+  const stopRow = el("div", "talon-stop-row");
+  const stopBtn = el("button", "talon-stop", "STOP");
+  stopBtn.type = "button";
+  buttons.append(openBtn, closeBtn, stopBtn);
+  const switches = el("fieldset", "talon-switches");
+  switches.appendChild(el("legend", null, "Sensores y condiciones"));
+  const parkLeds = SETUPS.map(s => {
+    const led = roofLed(`${shortSetupName(s.name)} PARK`, `Montura de ${s.name} aparcada`);
+    switches.appendChild(led);
+    return [s.id, led];
+  });
+  const safeLed = roofLed("SAFE", "Monitor de seguridad de NINA");
+  const connLed = roofLed("CONN", "Techo conectado en NINA (ASCOM)");
+  const movLed = roofLed("MOV", "Techo en movimiento");
+  switches.append(safeLed, connLed, movLed);
+  body.append(msg, status, buttons, stopRow, switches, el("div", "talon-footer"));
+  card.appendChild(body);
+
+  openBtn.addEventListener("click", () => roofCommand("open"));
+  closeBtn.addEventListener("click", () => roofCommand("close"));
+  stopBtn.addEventListener("click", () => roofCommand("stop"));
+  roofEls = {card, msg, statusVal, viaVal, safeVal, openBtn, closeBtn, stopBtn, parkLeds, safeLed, connLed, movLed,
+    sending: false};
+  renderRoof();
+  return card;
+}
+
+function setLed(led, state) {
+  led.classList.remove("on", "alarm", "moving", "unknown");
+  led.classList.add(state);
+}
+
+function roofSummary() {
+  const connected = SETUPS.map(s => [s, STATES[s.id]]).filter(([, st]) => st?.connected);
+  const domeOwner = connected.find(([, st]) => st.dome?.Connected);
+  let dome = domeOwner?.[1].dome || null;
+  let via = domeOwner ? `NINA ${domeOwner[0].name}` : null;
+  if (ROOF_ALPACA.source === "alpaca" && ROOF_ALPACA.Connected) {
+    dome = ROOF_ALPACA;
+    via = "Talon6 (Alpaca)";
+  }
+  const safeties = connected.map(([, st]) => st.safety).filter(sf => sf?.Connected);
+  const notParked = SETUPS.filter(s => STATES[s.id]?.mount?.Connected && STATES[s.id].mount.AtPark !== true);
+  return {dome, via, safeties, notParked};
+}
+
+function renderRoof() {
+  if (!roofEls) return;
+  const {dome, via, safeties, notParked} = roofSummary();
+  const shutter = dome?.ShutterStatus;
+  roofEls.statusVal.textContent = dome ? (ROOF_STATUS[shutter] || shutter || "—") : "Sin conexión";
+  roofEls.viaVal.textContent = via || "—";
+  if (!safeties.length) roofEls.safeVal.textContent = "—";
+  else roofEls.safeVal.textContent = safeties.every(sf => sf.IsSafe) ? "SAFE" : "UNSAFE";
+  const moving = shutter === "ShutterOpening" || shutter === "ShutterClosing" || dome?.Slewing === true;
+  roofEls.openBtn.disabled = !dome || roofEls.sending;
+  roofEls.closeBtn.disabled = !dome || roofEls.sending;
+  roofEls.stopBtn.disabled = !dome;
+  for (const [id, led] of roofEls.parkLeds) {
+    const mount = STATES[id]?.mount;
+    setLed(led, !STATES[id]?.connected || !mount?.Connected ? "unknown" : mount.AtPark === true ? "on" : "alarm");
+  }
+  setLed(roofEls.safeLed, !safeties.length ? "unknown" : safeties.every(sf => sf.IsSafe) ? "on" : "alarm");
+  setLed(roofEls.connLed, dome ? "on" : "alarm");
+  setLed(roofEls.movLed, moving ? "moving" : dome ? "unknown" : "unknown");
+  if (!roofEls.userMsg) roofEls.msg.textContent = dome ? "Listo" : "Esperando a NINA…";
+}
+
+async function roofCommand(action) {
+  if (!roofEls) return;
+  const {notParked} = roofSummary();
+  if (action === "open" && !window.confirm("¿Abrir el techo del observatorio?")) return;
+  if (action === "close") {
+    const warn = notParked.length
+      ? `\n\nAtención: no constan aparcadas: ${notParked.map(s => s.name).join(", ")}. Talon6 puede negarse a cerrar.`
+      : "";
+    if (!window.confirm(`¿Cerrar el techo del observatorio?${warn}`)) return;
+  }
+  const label = {open: "Abriendo…", close: "Cerrando…", stop: "STOP enviado…"}[action];
+  roofEls.userMsg = true;
+  roofEls.msg.classList.remove("error");
+  roofEls.msg.textContent = `${label} (enviando a NINA)`;
+  if (action !== "stop") roofEls.sending = true;
+  renderRoof();
+  try {
+    const response = await fetch(`${API_BASE}/api/roof/${action}`, {
+      method: "POST", headers: {"X-Periconet-Action": "roof-control"},
+    });
+    const result = await response.json();
+    if (!response.ok || result.ok !== true) throw new Error(result.detail || "No se pudo enviar la orden.");
+    roofEls.msg.textContent = `${{open: "Open", close: "Close", stop: "STOP"}[action]} aceptado vía ${result.via}`;
+  } catch (error) {
+    roofEls.msg.classList.add("error");
+    roofEls.msg.textContent = error.message || "No se pudo contactar con Periconet.";
+  } finally {
+    roofEls.sending = false;
+    renderRoof();
+  }
+}
+
 function buildPanel(setup) {
   const panel = el("div", "panel");
   panel.id = `panel-${setup.id}`;
@@ -94,6 +234,14 @@ function buildPanel(setup) {
   actions.appendChild(endButton);
   header.appendChild(left);
   header.appendChild(actions);
+  const alertBanner = el("div", "alert-banner");
+  alertBanner.id = `alert-banner-${setup.id}`;
+  alertBanner.hidden = true;
+  const alertText = el("span", "alert-text");
+  const alertButton = el("button", null, "Desactivar");
+  alertButton.type = "button";
+  alertButton.addEventListener("click", () => clearAlerts(setup.id));
+  alertBanner.append(alertText, alertButton);
 
   const body = el("div", "panel-body");
 
@@ -121,6 +269,8 @@ function buildPanel(setup) {
 
   imageCol.appendChild(imageCell);
   imageCol.appendChild(exposureBlock);
+  const imageData = el("div", "image-data");
+  imageCol.appendChild(imageData);
 
   const dataCell = el("div", "data-cell");
 
@@ -145,11 +295,11 @@ function buildPanel(setup) {
     <div class="target-filters-wrap" id="target-filters-${setup.id}"></div>
   `;
 
-  const guideBlock = el("div", "block");
+  const guideBlock = el("div", "block guide-block");
   guideBlock.appendChild(el("div", "block-title", "Guiado en vivo (RA / DEC)"));
   const canvas = el("canvas");
   canvas.id = `guide-canvas-${setup.id}`;
-  canvas.height = 190;
+  canvas.height = 70;
   guideBlock.appendChild(canvas);
   const rmsRow = el("div", "rms-row");
   rmsRow.id = `rms-${setup.id}`;
@@ -175,14 +325,16 @@ function buildPanel(setup) {
 
   dataCell.appendChild(targetBlock);
   dataCell.appendChild(guideBlock);
+  // Versión Mac: HFR bajo el guiado; meridian flip y meteorología bajo la imagen.
   dataCell.appendChild(hfrBlock);
-  dataCell.appendChild(meridianBlock);
-  dataCell.appendChild(weatherBlock);
+  imageData.appendChild(meridianBlock);
+  imageData.appendChild(weatherBlock);
 
   body.appendChild(imageCol);
   body.appendChild(dataCell);
 
   panel.appendChild(header);
+  panel.appendChild(alertBanner);
   panel.appendChild(endStatus);
   panel.appendChild(body);
   return panel;
@@ -825,6 +977,48 @@ function applyFullState(setupId, update) {
   if (update.guide_steps) renderGuiding(setupId);
   changed(setupId, "weather", [state.weather, state.safety], () => renderWeather(setupId, state.weather, state.safety));
   renderMeridian(setupId, state.mount);
+  renderAlerts(setupId);
+}
+
+// ---- Alarmas: parpadeo hasta pulsar «Desactivar» -------------------------
+const seenAlertIds = new Set();
+let alertsPrimed = false;
+
+function renderAlerts(setupId) {
+  const alerts = STATES[setupId]?.alerts || [];
+  const panel = document.getElementById(`panel-${setupId}`);
+  const banner = document.getElementById(`alert-banner-${setupId}`);
+  if (!panel || !banner) return;
+  const errors = alerts.filter(a => a.kind === "error");
+  const star = alerts.some(a => a.kind === "star");
+  panel.classList.toggle("alert-error", errors.length > 0);
+  panel.classList.toggle("alert-star", star);
+  banner.hidden = alerts.length === 0;
+  banner.classList.toggle("star", !errors.length && star);
+  if (alerts.length) {
+    const last = errors.at(-1) || alerts.at(-1);
+    const when = new Date(last.time).toLocaleTimeString("es-ES", {hour: "2-digit", minute: "2-digit"});
+    const more = alerts.length > 1 ? ` (+${alerts.length - 1})` : "";
+    banner.querySelector(".alert-text").textContent =
+      `⚠ ${when} · ${last.title}${last.detail ? " — " + last.detail : ""}${more}`;
+    banner.title = alerts.map(a => `${a.title}${a.detail ? " — " + a.detail : ""}`).join("\n");
+  }
+  // Sonido para errores nuevos (la estrella perdida ya tiene su propio aviso).
+  const fresh = errors.filter(a => !seenAlertIds.has(a.id));
+  alerts.forEach(a => seenAlertIds.add(a.id));
+  if (alertsPrimed && fresh.length) { playAlertBeep(); setTimeout(playAlertBeep, 600); }
+  const any = Object.values(STATES).some(st => st?.alerts?.length);
+  const all = document.getElementById("alerts-clear-all");
+  if (all) all.hidden = !any;
+}
+
+async function clearAlerts(setupId) {
+  const query = setupId ? `?setup_id=${encodeURIComponent(setupId)}` : "";
+  try {
+    await fetch(`${API_BASE}/api/alerts/clear${query}`, {
+      method: "POST", headers: {"X-Periconet-Action": "alerts-clear"},
+    });
+  } catch { /* el WebSocket actualizará el estado */ }
 }
 
 // Gestión del Visor Lightbox con Zoom & Pan de Alta Resolución
@@ -1016,6 +1210,7 @@ function initModalEvents() {
 async function init() {
   initModalEvents();
   updateSoundButton();
+  document.getElementById("alerts-clear-all").addEventListener("click", () => clearAlerts(null));
   document.getElementById("sound-toggle").addEventListener("click", () => {
     soundEnabled = !soundEnabled;
     localStorage.setItem("periconet_sound", soundEnabled ? "on" : "off");
@@ -1040,17 +1235,40 @@ async function init() {
   const container = document.getElementById("panels");
   SETUPS.forEach(s => container.appendChild(buildPanel(s)));
 
+  // Versión Mac: fila inferior = all-sky, cámaras (mismo tamaño que el all-sky),
+  // seeing y el resto; las tarjetas con tamaño "side" van a la columna derecha.
   const extras = document.getElementById("extras");
+  const side = document.getElementById("layout-side");
+  const images = config.extra_images || [];
   const cameraCard = config.cameras?.length ? buildCameraCard(config.cameras) : null;
-  (config.extra_images || []).forEach((img, i) => {
-    if (img.url) extras.appendChild(buildExtraCard(img, i));
-    if (i === 1 && cameraCard) extras.appendChild(cameraCard);
-  });
-  if (cameraCard) {
-    if (!cameraCard.parentNode) extras.appendChild(cameraCard);
-    extras.classList.add("with-cameras");
-    extras.style.setProperty("--extra-columns", Math.min(3, extras.childElementCount));
+  const order = [1, "cameras", 0, ...images.map((_, i) => i).filter(i => i > 1)];
+  for (const item of order) {
+    if (item === "cameras") {
+      if (!cameraCard) continue;
+      const allsky = images[1];
+      const size = allsky?.url && allsky.size !== "side" ? (allsky.size || "normal") : "normal";
+      cameraCard.classList.add(`size-${size}`);
+      extras.appendChild(cameraCard);
+      continue;
+    }
+    const img = images[item];
+    if (item === 0) {
+      // Seeing + panel del techo debajo, en la misma columna.
+      // La columna se ajusta a la altura de la fila (all-sky / cámaras).
+      const stack = el("div", `extra-stack extra-card-slot size-${img?.url && img.size !== "side" ? (img.size || "normal") : "small"}`);
+      const inner = el("div", "extra-stack-inner");
+      if (img?.url && img.size !== "side") inner.appendChild(buildExtraCard(img, 0));
+      else if (img?.url) side.appendChild(buildExtraCard(img, 0));
+      inner.appendChild(buildRoofCard());
+      stack.appendChild(inner);
+      extras.appendChild(stack);
+      continue;
+    }
+    if (!img?.url) continue;
+    const card = buildExtraCard(img, item);
+    (img.size === "side" ? side : extras).appendChild(card);
   }
+  if (side.childElementCount) document.getElementById("layout").classList.add("has-side");
 
   connectWebSocket();
   startWatchdog();
@@ -1060,12 +1278,22 @@ async function init() {
   }, 1000);
 }
 
+// Versión Mac: con la pestaña oculta no se descarga nada (ahorro de datos Starlink).
+const visibilityListeners = new Set();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) visibilityListeners.forEach(fn => fn());
+});
+
 function pollImage(url, seconds, onImage, onError) {
   let timer = null;
   let pending = false;
+  let last = 0;
+  const period = Math.max(10, seconds) * 1000;
+  visibilityListeners.add(() => { if (timer !== null && Date.now() - last >= period) refresh(); });
   const refresh = () => {
-    if (pending) return;
+    if (pending || document.hidden) return;
     pending = true;
+    last = Date.now();
     loadDecodedImage(`${url}?t=${Date.now()}`, image => {
       pending = false;
       if (timer !== null) onImage(image);
@@ -1077,7 +1305,7 @@ function pollImage(url, seconds, onImage, onError) {
   return active => {
     if (active === (timer !== null)) return;
     if (active) {
-      timer = setInterval(refresh, Math.max(10, seconds) * 1000);
+      timer = setInterval(refresh, period);
       refresh();
     } else {
       clearInterval(timer);
@@ -1086,8 +1314,100 @@ function pollImage(url, seconds, onImage, onError) {
   };
 }
 
+// Página web completa dentro de una tarjeta (versión Mac). La página se dibuja
+// a un tamaño virtual y se escala a la tarjeta; los botones −/+ cambian el zoom
+// (se recuerda en este navegador). Cada refresh_seconds se recarga en segundo
+// plano y se cambia sin parpadeo.
+const PAGE_BASE_WIDTH = {side: 900};
+const PAGE_DEFAULT_WIDTH = 1920;
+
+function pageZoomKey(img) { return `periconet-zoom:${img.url}`; }
+function loadPageZoom(img) {
+  try { return Number(localStorage.getItem(pageZoomKey(img))) || 1; } catch { return 1; }
+}
+function savePageZoom(img, zoom) {
+  try { localStorage.setItem(pageZoomKey(img), String(zoom)); } catch { /* sin almacenamiento */ }
+}
+
+function buildPageCard(img, index) {
+  const size = img.size || "large";
+  const card = el("div", `extra-card size-${size}`);
+  const header = el("div", "panel-header");
+  header.appendChild(el("h2", null, img.title || `Página ${index + 1}`));
+  const right = el("span");
+  const upd = el("span", "upd", "cargando…");
+  const zoomOut = el("button", "zoom-btn", "−");
+  const zoomIn = el("button", "zoom-btn", "+");
+  zoomOut.type = zoomIn.type = "button";
+  zoomOut.title = "Alejar (ver más página)";
+  zoomIn.title = "Acercar";
+  const link = el("a", "open-link", "abrir ↗");
+  link.href = img.url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  right.appendChild(upd);
+  right.appendChild(zoomOut);
+  right.appendChild(zoomIn);
+  right.appendChild(link);
+  header.appendChild(right);
+  const frame = el("div", "page-frame");
+  card.appendChild(header);
+  card.appendChild(frame);
+
+  const baseWidth = PAGE_BASE_WIDTH[size] || PAGE_DEFAULT_WIDTH;
+  let zoom = loadPageZoom(img);
+  const fit = iframe => {
+    const w = frame.clientWidth || 1;
+    const h = frame.clientHeight || 1;
+    const scale = (w / baseWidth) * zoom;
+    iframe.style.width = `${Math.ceil(w / scale)}px`;
+    iframe.style.height = `${Math.ceil(h / scale)}px`;
+    iframe.style.transform = `scale(${scale})`;
+  };
+  const refit = () => frame.querySelectorAll("iframe").forEach(fit);
+  new ResizeObserver(refit).observe(frame);
+  const setZoom = factor => {
+    zoom = Math.min(4, Math.max(0.25, zoom * factor));
+    savePageZoom(img, zoom);
+    refit();
+  };
+  zoomOut.addEventListener("click", () => setZoom(1 / 1.1));
+  zoomIn.addEventListener("click", () => setZoom(1.1));
+
+  const load = () => {
+    const next = document.createElement("iframe");
+    next.className = "loading";
+    next.title = img.title || "";
+    next.referrerPolicy = "no-referrer";
+    next.scrolling = "no";
+    fit(next);
+    const timeout = setTimeout(() => {
+      if (next.parentNode && next.classList.contains("loading")) {
+        next.remove();
+        upd.textContent = "sin conexión";
+      }
+    }, 20000);
+    next.addEventListener("load", () => {
+      clearTimeout(timeout);
+      next.classList.remove("loading");
+      frame.querySelectorAll("iframe").forEach(old => { if (old !== next) old.remove(); });
+      upd.textContent = new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+    });
+    next.src = img.url + (img.url.includes("?") ? "&" : "?") + "_t=" + Date.now();
+    frame.appendChild(next);
+  };
+  const period = Math.max(10, img.refresh_seconds || 60) * 1000;
+  let last = Date.now();
+  const tick = () => { if (!document.hidden) { last = Date.now(); load(); } };
+  load();
+  setInterval(tick, period);
+  visibilityListeners.add(() => { if (Date.now() - last >= period) tick(); });
+  return card;
+}
+
 function buildExtraCard(img, index) {
-  const card = el("div", "extra-card");
+  if (img.kind === "page") return buildPageCard(img, index);
+  const card = el("div", `extra-card size-${img.size || "normal"}`);
   const header = el("div", "panel-header");
   header.appendChild(el("h2", null, img.title || `Imagen ${index + 1}`));
   const upd = el("span", "upd", "");
@@ -1228,6 +1548,28 @@ function markDisconnected() {
       exposure:{camera_state:"Desconectado", is_exposing:false}, guiding_status:"desconectado"});
   }
 }
+// Versión Mac/Windows: cerrar Periconet desde el dashboard (solo en el propio equipo).
+(() => {
+  const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(location.hostname);
+  const wrap = document.getElementById("shutdown-wrap");
+  const link = document.getElementById("shutdown-link");
+  if (!local || !wrap || !link) return;
+  wrap.hidden = false;
+  link.addEventListener("click", async event => {
+    event.preventDefault();
+    if (!window.confirm("¿Cerrar Periconet? Dejará de vigilar los equipos hasta que lo vuelvas a abrir.")) return;
+    try {
+      const response = await fetch("/api/shutdown", {method: "POST", headers: {"X-Periconet-Action": "shutdown"}});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "No se pudo cerrar.");
+      document.body.innerHTML = '<p style="font:1rem system-ui;color:#ccc;text-align:center;margin-top:20vh">' +
+        "Periconet se ha cerrado. Puedes cerrar esta pestaña.</p>";
+    } catch (error) {
+      window.alert(error.message || "No se pudo cerrar Periconet.");
+    }
+  });
+})();
+
 function connectWebSocket() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -1240,8 +1582,14 @@ function connectWebSocket() {
     }
     if (data.type === "initial_state") {
       Object.entries(data.state).forEach(([id, state]) => { delete STATES[id]; applyFullState(id, state); });
+      alertsPrimed = true;
+      renderRoof();
+    } else if (data.type === "roof_update") {
+      ROOF_ALPACA = data.roof || {};
+      renderRoof();
     } else if (data.type === "nina_update") {
       applyFullState(data.setup_id, data.state);
+      renderRoof();
     } else if (data.type === "guide_step") {
       const state = STATES[data.setup_id];
       if (!state || data.point.seq <= (state.guide_seq || 0)) return;
@@ -1251,6 +1599,11 @@ function connectWebSocket() {
       state.guiding_status = "guiando";
       updateBadge(data.setup_id, "guiando");
       renderGuiding(data.setup_id);
+    } else if (data.type === "alerts") {
+      const state = STATES[data.setup_id];
+      if (!state) return;
+      state.alerts = data.alerts || [];
+      renderAlerts(data.setup_id);
     } else if (data.type === "guiding_status") {
       const state = STATES[data.setup_id];
       if (!state) return;
