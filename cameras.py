@@ -1,6 +1,8 @@
 """Configuración y capturas HTTP de las cámaras del observatorio."""
 
 import asyncio
+import logging
+import ssl
 import uuid
 from typing import Annotated
 
@@ -15,6 +17,8 @@ from pydantic import (
 )
 
 import camera_credentials
+
+logger = logging.getLogger("periconet.cameras")
 
 CameraId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
 SECRET_QUERY_FIELDS = {
@@ -179,6 +183,52 @@ class CameraAuth(httpx.Auth):
             yield next(self.basic.auth_flow(request))
 
 
+def _is_ssl_error(exc):
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _legacy_ssl_context():
+    """Contexto TLS permisivo para cámaras locales con certificados propios o TLS antiguo."""
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0)
+    try:
+        context.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+    except (AttributeError, ssl.SSLError, ValueError):
+        pass
+    for ciphers in ("DEFAULT:@SECLEVEL=0", "DEFAULT:@SECLEVEL=1", "DEFAULT"):
+        try:
+            context.set_ciphers(ciphers)
+            break
+        except ssl.SSLError:
+            continue
+    return context
+
+
+async def _fetch_snapshot(url, auth, verify=True):
+    async with (
+        httpx.AsyncClient(timeout=8, trust_env=False, verify=verify) as client,
+        client.stream("GET", url, auth=auth) as response,
+    ):
+        response.raise_for_status()
+        data = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(data) + len(chunk) > MAX_SNAPSHOT_BYTES:
+                return None
+            data.extend(chunk)
+        if not data.startswith(b"\xff\xd8\xff"):
+            return None
+        return bytes(data)
+
+
 async def download_snapshot(camera):
     try:
         async with asyncio.timeout(8):
@@ -194,16 +244,12 @@ async def download_snapshot(camera):
                 if credentials is None:
                     return None
                 auth = CameraAuth(*credentials)
-            async with httpx.AsyncClient(timeout=8, trust_env=False) as client:
-                async with client.stream("GET", url, auth=auth) as response:
-                    response.raise_for_status()
-                    data = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        if len(data) + len(chunk) > MAX_SNAPSHOT_BYTES:
-                            return None
-                        data.extend(chunk)
-                    if not data.startswith(b"\xff\xd8\xff"):
-                        return None
-                    return bytes(data)
+            try:
+                return await _fetch_snapshot(url, auth)
+            except (OSError, httpx.HTTPError) as exc:
+                if not _is_ssl_error(exc):
+                    raise
+                logger.debug("Reintentando captura sin verificación SSL estricta (%s): %s", camera.get("name", url), exc)
+                return await _fetch_snapshot(url, auth, verify=_legacy_ssl_context())
     except (OSError, httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError):
         return None

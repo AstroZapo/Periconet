@@ -506,3 +506,51 @@ async def test_camera_download_uses_direct_url_without_separate_http_auth(
         assert b64decode(authorization.split(" ", 1)[1]) == b"demo:test-secret"
     else:
         assert authorization is None
+
+
+@pytest.mark.asyncio
+async def test_camera_download_retries_with_permissive_ssl_after_handshake_error(monkeypatch):
+    import ssl
+
+    verifies = []
+
+    def camera_api(request):
+        if verifies[-1] is True:
+            raise httpx.ConnectError(
+                "SSL handshake failed",
+                request=request,
+            ) from ssl.SSLError("handshake failure")
+        return httpx.Response(200, content=b"\xff\xd8\xffok")
+
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(camera_api)
+
+    def make_client(**kwargs):
+        verifies.append(kwargs.get("verify"))
+        return client(transport=transport, **kwargs)
+
+    monkeypatch.setattr(cameras.httpx, "AsyncClient", make_client)
+    camera = {"name": "Allsky", "url": "https://camera/snapshot", "credential_id": None}
+    assert await cameras.download_snapshot(camera) == b"\xff\xd8\xffok"
+    assert len(verifies) == 2
+    assert verifies[0] is True
+    assert isinstance(verifies[1], ssl.SSLContext)
+    assert verifies[1].verify_mode == ssl.CERT_NONE
+    assert verifies[1].check_hostname is False
+
+
+@pytest.mark.asyncio
+async def test_camera_download_does_not_retry_ssl_on_non_ssl_connect_error(monkeypatch):
+    calls = 0
+
+    def camera_api(request):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("connection refused", request=request)
+
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(camera_api)
+    monkeypatch.setattr(cameras.httpx, "AsyncClient", lambda **kwargs: client(transport=transport, **kwargs))
+    camera = {"name": "Allsky", "url": "https://camera/snapshot", "credential_id": None}
+    assert await cameras.download_snapshot(camera) is None
+    assert calls == 1

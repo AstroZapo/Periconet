@@ -19,7 +19,10 @@ import urllib.request
 import webbrowser
 from logging.handlers import RotatingFileHandler
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+if getattr(sys, "frozen", False):
+    sys.path.insert(0, getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
+else:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import uvicorn  # noqa: E402
 

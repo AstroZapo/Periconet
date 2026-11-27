@@ -16,7 +16,7 @@ from pathlib import Path
 
 FROZEN = bool(getattr(sys, "frozen", False))
 BASE_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).resolve().parent
-RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
+RESOURCE_DIR = Path(sys._MEIPASS) if FROZEN and hasattr(sys, "_MEIPASS") else BASE_DIR
 
 if os.environ.get("PERICONET_HOME"):
     DATA_DIR = Path(os.environ["PERICONET_HOME"]).expanduser()

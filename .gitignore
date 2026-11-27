@@ -3,9 +3,10 @@
 /.config-*.tmp
 
 # Entornos virtuales de Python
-/env/
-/.venv/
-/venv/
+env/
+.venv/
+venv/
+*.venv/
 
 # Cachés y resultados de pruebas
 __pycache__/
@@ -21,8 +22,8 @@ __pycache__/
 *.log
 
 # Salidas de PyInstaller
-/build/
-/dist/
+build/
+dist/
 *.spec
 
 # Node / pnpm

@@ -768,9 +768,12 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
 
 
-frontend_dir = BASE_DIR / "frontend"
-if not frontend_dir.exists():
-    frontend_dir = RESOURCE_DIR / "frontend"
+if getattr(sys, "frozen", False):
+    frontend_dir = Path(getattr(sys, "_MEIPASS", RESOURCE_DIR)) / "frontend"
+else:
+    frontend_dir = BASE_DIR / "frontend"
+    if not frontend_dir.exists():
+        frontend_dir = RESOURCE_DIR / "frontend"
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 
